@@ -26,6 +26,8 @@ public static class Program
 
             var tokenProvider = new TokenProvider(envConfig.Auth);
 
+            var testConnectionsFlag = args.Any(a => a.Equals("--test-connections", StringComparison.OrdinalIgnoreCase));
+
             var sourceSchemaReader = new SourceSchemaReader(envConfig.SourceSql.ConnectionString, envConfig.SchemaDiscovery);
             var sourceChunkReader = new SourceChunkReader(envConfig.SourceSql.ConnectionString);
 
@@ -35,6 +37,38 @@ public static class Program
             var warehouseConnFactory = new WarehouseConnectionFactory(envConfig.FabricWarehouse, tokenProvider);
             var schemaManager = new WarehouseSchemaManager(warehouseConnFactory);
             var loaderTarget = new WarehouseLoader(warehouseConnFactory);
+
+            if (testConnectionsFlag)
+            {
+                Console.WriteLine("Running connection tests...");
+
+                // 1) Test SQL connection (open/close)
+                try
+                {
+                    using var conn = await warehouseConnFactory.OpenAsync();
+                    Console.WriteLine("SQL Warehouse: OK");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"SQL Warehouse: FAILED - {ex.Message}");
+                    return 2;
+                }
+
+                // 2) Test OneLake access
+                try
+                {
+                    await uploader.TestConnectionAsync();
+                    Console.WriteLine("OneLake staging: OK");
+                }
+                catch (Exception ex)
+                {
+                    Console.Error.WriteLine($"OneLake staging: FAILED - {ex.Message}");
+                    return 3;
+                }
+
+                Console.WriteLine("All connection checks passed.");
+                return 0;
+            }
 
             foreach (var stream in streams.Streams)
             {

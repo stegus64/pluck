@@ -15,6 +15,18 @@ public sealed class OneLakeUploader
         _svc = new DataLakeServiceClient(new Uri("https://onelake.dfs.fabric.microsoft.com"), tokenProvider.Credential);
     }
 
+    public async Task TestConnectionAsync(CancellationToken ct = default)
+    {
+        var fs = _svc.GetFileSystemClient(_cfg.WorkspaceId);
+        // Attempt to read filesystem properties to validate workspace access
+        await fs.GetPropertiesAsync(cancellationToken: ct);
+        // Also check that the lakehouse Files root (/<lakehouseId>/Files) is accessible.
+        // NOTE: per quick connectivity test we ignore the configured FilesPath and only test the Files root.
+        var directoryPath = $"{_cfg.LakehouseId}/Files".TrimEnd('/');
+        var dir = fs.GetDirectoryClient(directoryPath);
+        await dir.GetPropertiesAsync(cancellationToken: ct);
+    }
+
     public async Task<string> UploadAsync(string localPath, string relativeFileName)
     {
         // OneLake DFS URL pattern for COPY INTO:
