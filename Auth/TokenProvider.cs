@@ -6,30 +6,20 @@ namespace FabricIncrementalReplicator.Auth;
 
 public sealed class TokenProvider
 {
-    private readonly ChainedTokenCredential _credential;
+    private readonly TokenCredential _cred;
+    private readonly string _tenantId;
 
-    public TokenProvider(AuthConfig cfg)
+    public TokenProvider(AuthConfig auth)
     {
-        // Use ClientSecretCredential for service principal (sp) authentication
-        var spCredential = new ClientSecretCredential(
-            cfg.TenantId,
-            cfg.ClientId,
-            cfg.ClientSecret
-        );
-
-        // Chain with DefaultAzureCredential for local development fallback
-        _credential = new ChainedTokenCredential(spCredential, new DefaultAzureCredential());
+        _tenantId = auth.TenantId;
+        _cred = new ClientSecretCredential(auth.TenantId, auth.ClientId, auth.ClientSecret);
     }
-
-    public TokenCredential Credential => _credential;
 
     public async Task<string> GetTokenAsync(string[] scopes, CancellationToken ct = default)
     {
-        var token = await _credential.GetTokenAsync(
-            new TokenRequestContext(scopes),
-            ct
-        );
+        var token = await _cred.GetTokenAsync(new TokenRequestContext(scopes), ct);
         return token.Token;
     }
-}
 
+    public TokenCredential Credential => _cred;
+}

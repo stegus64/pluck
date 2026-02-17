@@ -1,43 +1,39 @@
 using FabricIncrementalReplicator.Source;
-using FabricIncrementalReplicator.Util;
 
 namespace FabricIncrementalReplicator.Target;
 
-public sealed class MergeBuilder
+public static class MergeBuilder
 {
-    public string BuildMergeSql(
-        string targetSchema,
+    public static string BuildMergeSql(
+        string schema,
         string targetTable,
         string tempTable,
         List<SourceColumn> columns,
         List<string> primaryKey)
     {
-        // Build ON condition based on primary key
-        var onCondition = string.Join(" AND ",
-            primaryKey.Select(pk => $"t.[{pk}] = s.[{pk}]"));
+        var on = string.Join(" AND ", primaryKey.Select(pk => $"t.[{pk}] = s.[{pk}]"));
 
-        // Build SET clause for UPDATE (all non-key columns)
-        var setClause = string.Join(",\n    ",
-            columns
-                .Where(c => !primaryKey.Contains(c.Name, StringComparer.OrdinalIgnoreCase))
-                .Select(c => $"t.[{c.Name}] = s.[{c.Name}]"));
+        var nonPkCols = columns
+            .Select(c => c.Name)
+            .Where(c => !primaryKey.Contains(c, StringComparer.OrdinalIgnoreCase))
+            .ToList();
 
-        // Build column list for INSERT
-        var insertColumns = string.Join(", ", columns.Select(c => $"[{c.Name}]"));
-        var selectColumns = string.Join(", ", columns.Select(c => $"s.[{c.Name}]"));
+        var setClause = nonPkCols.Count == 0
+            ? "/* no non-PK columns */"
+            : string.Join(", ", nonPkCols.Select(c => $"t.[{c}] = s.[{c}]"));
 
-        var mergeSql = $@"
-MERGE [{targetSchema}].[{targetTable}] t
-USING [{targetSchema}].[{tempTable}] s
-    ON {onCondition}
+        var insertCols = string.Join(", ", columns.Select(c => $"[{c.Name}]"));
+        var insertVals = string.Join(", ", columns.Select(c => $"s.[{c.Name}]"));
+
+        return $@"
+MERGE [{schema}].[{targetTable}] AS t
+USING [{schema}].[{tempTable}] AS s
+ON {on}
 WHEN MATCHED THEN
-    UPDATE SET
-    {setClause}
-WHEN NOT MATCHED THEN
-    INSERT ({insertColumns})
-    VALUES ({selectColumns});
+    UPDATE SET {setClause}
+WHEN NOT MATCHED BY TARGET THEN
+    INSERT ({insertCols})
+    VALUES ({insertVals});
 ";
-
-        return mergeSql;
     }
 }

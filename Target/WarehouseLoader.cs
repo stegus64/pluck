@@ -1,5 +1,5 @@
-using FabricIncrementalReplicator.Source;
 using FabricIncrementalReplicator.Config;
+using FabricIncrementalReplicator.Source;
 using FabricIncrementalReplicator.Util;
 using Microsoft.Data.SqlClient;
 
@@ -8,27 +8,17 @@ namespace FabricIncrementalReplicator.Target;
 public sealed class WarehouseLoader
 {
     private readonly WarehouseConnectionFactory _factory;
-
     public WarehouseLoader(WarehouseConnectionFactory factory) => _factory = factory;
 
-    /// <summary>
-    /// Get the maximum value of the update key from the target table to use as watermark.
-    /// </summary>
-    public async Task<object?> GetMaxUpdateKeyAsync(string schema, string table, string updateKey, CancellationToken ct = default)
+    public async Task<object?> GetMaxUpdateKeyAsync(string schema, string table, string updateKey)
     {
-        await using var conn = await _factory.OpenAsync(ct);
-
+        await using var conn = await _factory.OpenAsync();
         var sql = $"SELECT MAX([{updateKey}]) FROM [{schema}].[{table}];";
-
         await using var cmd = new SqlCommand(sql, conn);
-        var result = await cmd.ExecuteScalarAsync(ct);
-
-        return result == DBNull.Value ? null : result;
+        var v = await cmd.ExecuteScalarAsync();
+        return v is DBNull ? null : v;
     }
 
-    /// <summary>
-    /// Load data from OneLake staging via COPY INTO, then perform MERGE to synchronize with target.
-    /// </summary>
     public async Task LoadAndMergeAsync(
         string targetSchema,
         string targetTable,
@@ -36,97 +26,54 @@ public sealed class WarehouseLoader
         List<SourceColumn> columns,
         List<string> primaryKey,
         string oneLakeDfsUrl,
-        CleanupConfig cleanup,
-        CancellationToken ct = default)
+        CleanupConfig cleanup)
     {
-        await using var conn = await _factory.OpenAsync(ct);
+        await using var conn = await _factory.OpenAsync();
+        await using var tx = conn.BeginTransaction();
 
-        try
-        {
-            // 1. Load into temp table via COPY INTO
-            await CopyIntoTempTableAsync(conn, targetSchema, tempTable, columns, oneLakeDfsUrl, ct);
+        // 1) Create temp table
+        var colDefs = string.Join(",\n", columns.Select(c =>
+            $"[{c.Name}] {TypeMapper.SqlServerToFabricWarehouseType(c.SqlServerTypeName)} NULL"));
 
-            // 2. Perform MERGE
-            var mergeBuilder = new MergeBuilder();
-            var mergeSql = mergeBuilder.BuildMergeSql(
-                targetSchema,
-                targetTable,
-                tempTable,
-                columns,
-                primaryKey
-            );
-
-            await ExecAsync(conn, mergeSql, ct);
-        }
-        finally
-        {
-            // Cleanup temp table if requested
-            if (cleanup.DropTempTables)
-            {
-                var dropSql = $"DROP TABLE IF EXISTS [{targetSchema}].[{tempTable}];";
-                try
-                {
-                    await ExecAsync(conn, dropSql, ct);
-                }
-                catch
-                {
-                    // Ignore cleanup errors
-                }
-            }
-        }
-    }
-
-    private async Task CopyIntoTempTableAsync(
-        SqlConnection conn,
-        string schema,
-        string tempTable,
-        List<SourceColumn> columns,
-        string oneLakeDfsUrl,
-        CancellationToken ct)
-    {
-        // Create temp table
-        var colDefs = string.Join(",\n",
-            columns.Select(c => $"[{c.Name}] {TypeMapper.SqlServerToFabricWarehouseType(c.SqlServerTypeName)} NULL"));
-
-        var createTableSql = $@"
-CREATE TABLE [{schema}].[{tempTable}] (
+        var createTempSql = $@"
+CREATE TABLE [{targetSchema}].[{tempTable}] (
 {colDefs}
 );
 ";
+        await ExecAsync(conn, tx, createTempSql);
 
-        await ExecAsync(conn, createTableSql, ct);
-
-        // COPY INTO from OneLake (CSV.GZ format)
-        var copyIntoSql = $@"
-COPY INTO [{schema}].[{tempTable}]
-    ({string.Join(", ", columns.Select(c => $"[{c.Name}]"))})
+        // 2) COPY INTO from OneLake (CSV + gzip supported; OneLake supported as source in Fabric) :contentReference[oaicite:8]{index=8}
+        var colList = string.Join(",", columns.Select(c => $"[{c.Name}]"));
+        var copySql = $@"
+COPY INTO [{targetSchema}].[{tempTable}] ({colList})
 FROM '{oneLakeDfsUrl}'
 WITH (
     FILE_TYPE = 'CSV',
-    CREDENTIAL = (IDENTITY = 'Shared Access Signature', SECRET = '?sp=racwd&st=...')
+    COMPRESSION = 'GZIP',
+    FIRSTROW = 2,
+    FIELDTERMINATOR = ',',
+    ROWTERMINATOR = '0x0A'
 );
 ";
+        await ExecAsync(conn, tx, copySql);
 
-        // Note: The CREDENTIAL part above is a placeholder. 
-        // In practice, Fabric Warehouse uses Entra ID, so you may not need explicit credentials
-        // For now, we'll use a simpler COPY INTO without the credential for Fabric Warehouse
-        var simpleCopyIntoSql = $@"
-COPY INTO [{schema}].[{tempTable}]
-    ({string.Join(", ", columns.Select(c => $"[{c.Name}]"))})
-FROM '{oneLakeDfsUrl}'
-WITH (
-    FILE_TYPE = 'CSV',
-    COMPRESSION = 'GZIP'
-);
-";
+        // 3) MERGE into target (MERGE supported in Fabric Warehouse per official surface area) :contentReference[oaicite:9]{index=9}
+        var mergeSql = MergeBuilder.BuildMergeSql(targetSchema, targetTable, tempTable, columns, primaryKey);
+        await ExecAsync(conn, tx, mergeSql);
 
-        await ExecAsync(conn, simpleCopyIntoSql, ct);
+        // 4) Cleanup temp table
+        if (cleanup.DropTempTables)
+        {
+            var dropSql = $@"DROP TABLE [{targetSchema}].[{tempTable}];";
+            await ExecAsync(conn, tx, dropSql);
+        }
+
+        await tx.CommitAsync();
     }
 
-    private static async Task ExecAsync(SqlConnection conn, string sql, CancellationToken ct = default)
+    private static async Task ExecAsync(SqlConnection conn, SqlTransaction tx, string sql)
     {
-        await using var cmd = new SqlCommand(sql, conn);
-        cmd.CommandTimeout = 0; // No timeout for long-running operations
-        await cmd.ExecuteNonQueryAsync(ct);
+        await using var cmd = new SqlCommand(sql, conn, tx);
+        await cmd.ExecuteNonQueryAsync();
     }
 }
