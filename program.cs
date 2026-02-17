@@ -1,5 +1,6 @@
 using FabricIncrementalReplicator.Auth;
 using Microsoft.Extensions.Logging;
+using Microsoft.Data.SqlClient;
 using FabricIncrementalReplicator.Config;
 using FabricIncrementalReplicator.Source;
 using FabricIncrementalReplicator.Staging;
@@ -60,7 +61,20 @@ public static class Program
             {
                 logger.LogInformation("Running connection tests...");
 
-                // 1) Test SQL connection (open/close)
+                // 1) Test source SQL connection (open/close)
+                try
+                {
+                    await using var conn = new SqlConnection(envConfig.SourceSql.ConnectionString);
+                    await conn.OpenAsync();
+                    logger.LogInformation("Source SQL: OK");
+                }
+                catch (Exception ex)
+                {
+                    logger.LogError(ex, "Source SQL: FAILED");
+                    return 2;
+                }
+
+                // 2) Test warehouse SQL connection (open/close)
                 try
                 {
                     using var conn = await warehouseConnFactory.OpenAsync();
@@ -69,10 +83,10 @@ public static class Program
                 catch (Exception ex)
                 {
                     logger.LogError(ex, "SQL Warehouse: FAILED");
-                    return 2;
+                    return 3;
                 }
 
-                // 2) Test OneLake access
+                // 3) Test OneLake access
                 try
                 {
                     await uploader.TestConnectionAsync();
@@ -81,7 +95,7 @@ public static class Program
                 catch (Exception ex)
                 {
                     logger.LogError(ex, "OneLake staging: FAILED");
-                    return 3;
+                    return 4;
                 }
 
                 logger.LogInformation("All connection checks passed.");
@@ -150,6 +164,7 @@ public static class Program
 
                     var localPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), "chunk.csv.gz");
                     Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
+                    logger.LogDebug("Chunk {ChunkIndex} local csv.gz path: {LocalPath}", chunkIndex, localPath);
 
                     await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, chunkRows);
 
@@ -166,6 +181,7 @@ public static class Program
                         tempTable: tempTable,
                         columns: sourceColumns,
                         primaryKey: stream.PrimaryKey,
+                        expectedRowCount: chunkRows.Count,
                         oneLakeDfsUrl: oneLakePath,
                         cleanup: envConfig.Cleanup
                     );

@@ -35,11 +35,11 @@ public sealed class WarehouseLoader
         string tempTable,
         List<SourceColumn> columns,
         List<string> primaryKey,
+        int expectedRowCount,
         string oneLakeDfsUrl,
         CleanupConfig cleanup)
     {
         await using var conn = await _factory.OpenAsync();
-        await using var tx = conn.BeginTransaction();
 
         // 1) Create temp table
         var colDefs = string.Join(",\n", columns.Select(c =>
@@ -50,7 +50,7 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
 {colDefs}
 );
 ";
-        await ExecAsync(conn, tx, createTempSql);
+        await ExecAsync(conn, createTempSql);
 
         // 2) COPY INTO from OneLake (CSV + gzip supported; OneLake supported as source in Fabric) :contentReference[oaicite:8]{index=8}
         var colList = string.Join(",", columns.Select(c => $"[{c.Name}]"));
@@ -66,29 +66,50 @@ WITH (
 );
 ";
         _log.LogDebug("COPY INTO SQL: {Sql}", copySql);
-        await ExecAsync(conn, tx, copySql);
+        await ExecAsync(conn, copySql);
 
-        // 3) MERGE into target (MERGE supported in Fabric Warehouse per official surface area) :contentReference[oaicite:9]{index=9}
+        // 3) Verify rows loaded into temp table match source chunk rows
+        var loadedRowCount = await GetTableRowCountAsync(conn, targetSchema, tempTable);
+        if (loadedRowCount != expectedRowCount)
+        {
+            throw new Exception(
+                $"Chunk row count mismatch before merge for [{targetSchema}].[{tempTable}]. " +
+                $"Source rows={expectedRowCount}, temp table rows={loadedRowCount}.");
+        }
+
+        _log.LogInformation(
+            "Chunk row count verified for temp table [{Schema}].[{Table}]: {RowCount} rows.",
+            targetSchema,
+            tempTable,
+            loadedRowCount);
+
+        // 4) MERGE into target (MERGE supported in Fabric Warehouse per official surface area) :contentReference[oaicite:9]{index=9}
         var mergeSql = MergeBuilder.BuildMergeSql(targetSchema, targetTable, tempTable, columns, primaryKey);
         _log.LogDebug("MERGE SQL: {Sql}", mergeSql);
-        await ExecAsync(conn, tx, mergeSql);
+        await ExecAsync(conn, mergeSql);
 
-        // 4) Cleanup temp table
+        // 5) Cleanup temp table
         if (cleanup.DropTempTables)
         {
             var dropSql = $@"DROP TABLE [{targetSchema}].[{tempTable}];";
-            await ExecAsync(conn, tx, dropSql);
+            await ExecAsync(conn, dropSql);
         }
-
-        await tx.CommitAsync();
     }
 
-    private async Task ExecAsync(SqlConnection conn, SqlTransaction tx, string sql)
+    private async Task ExecAsync(SqlConnection conn, string sql)
     {
-        await using var cmd = new SqlCommand(sql, conn, tx);
+        await using var cmd = new SqlCommand(sql, conn);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await cmd.ExecuteNonQueryAsync();
         sw.Stop();
-        _log.LogDebug("Exec (tx) elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        _log.LogDebug("Exec elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+    }
+
+    private static async Task<int> GetTableRowCountAsync(SqlConnection conn, string schema, string table)
+    {
+        var sql = $@"SELECT COUNT(*) FROM [{schema}].[{table}];";
+        await using var cmd = new SqlCommand(sql, conn);
+        var result = await cmd.ExecuteScalarAsync();
+        return Convert.ToInt32(result);
     }
 }
