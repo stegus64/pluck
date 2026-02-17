@@ -1,4 +1,5 @@
 using FabricIncrementalReplicator.Auth;
+using Microsoft.Extensions.Logging;
 using FabricIncrementalReplicator.Config;
 using FabricIncrementalReplicator.Source;
 using FabricIncrementalReplicator.Staging;
@@ -26,17 +27,32 @@ public static class Program
 
             var tokenProvider = new TokenProvider(envConfig.Auth);
 
+            // Configure logging
+            var logLevelArg = GetArg(args, "--log-level") ?? "INFO";
+            var minLogLevel = logLevelArg.ToUpperInvariant() switch
+            {
+                "ERROR" => Microsoft.Extensions.Logging.LogLevel.Error,
+                "DEBUG" => Microsoft.Extensions.Logging.LogLevel.Debug,
+                _ => Microsoft.Extensions.Logging.LogLevel.Information,
+            };
+
+            using var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(builder =>
+            {
+                builder.AddSimpleConsole(options => { options.TimestampFormat = "HH:mm:ss "; options.SingleLine = true; });
+                builder.SetMinimumLevel(minLogLevel);
+            });
+
             var testConnectionsFlag = args.Any(a => a.Equals("--test-connections", StringComparison.OrdinalIgnoreCase));
 
-            var sourceSchemaReader = new SourceSchemaReader(envConfig.SourceSql.ConnectionString, envConfig.SchemaDiscovery);
-            var sourceChunkReader = new SourceChunkReader(envConfig.SourceSql.ConnectionString);
+            var sourceSchemaReader = new SourceSchemaReader(envConfig.SourceSql.ConnectionString, envConfig.SchemaDiscovery, loggerFactory.CreateLogger<SourceSchemaReader>());
+            var sourceChunkReader = new SourceChunkReader(envConfig.SourceSql.ConnectionString, loggerFactory.CreateLogger<SourceChunkReader>());
 
-            var uploader = new OneLakeUploader(envConfig.OneLakeStaging, tokenProvider);
+            var uploader = new OneLakeUploader(envConfig.OneLakeStaging, tokenProvider, loggerFactory.CreateLogger<OneLakeUploader>());
             var csvWriter = new CsvGzipWriter();
 
-            var warehouseConnFactory = new WarehouseConnectionFactory(envConfig.FabricWarehouse, tokenProvider);
-            var schemaManager = new WarehouseSchemaManager(warehouseConnFactory);
-            var loaderTarget = new WarehouseLoader(warehouseConnFactory);
+            var warehouseConnFactory = new WarehouseConnectionFactory(envConfig.FabricWarehouse, tokenProvider, loggerFactory.CreateLogger<WarehouseConnectionFactory>());
+            var schemaManager = new WarehouseSchemaManager(warehouseConnFactory, loggerFactory.CreateLogger<WarehouseSchemaManager>());
+            var loaderTarget = new WarehouseLoader(warehouseConnFactory, loggerFactory.CreateLogger<WarehouseLoader>());
 
             if (testConnectionsFlag)
             {

@@ -1,11 +1,17 @@
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
 
 namespace FabricIncrementalReplicator.Source;
 
 public sealed class SourceChunkReader
 {
     private readonly string _connString;
-    public SourceChunkReader(string connString) => _connString = connString;
+    private readonly Microsoft.Extensions.Logging.ILogger<SourceChunkReader> _log;
+    public SourceChunkReader(string connString, Microsoft.Extensions.Logging.ILogger<SourceChunkReader>? log = null)
+    {
+        _connString = connString;
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<SourceChunkReader>.Instance;
+    }
 
     public async Task<(object? Min, object? Max)> GetMinMaxUpdateKeyAsync(string sourceSql, string updateKey, object? watermark)
     {
@@ -22,8 +28,11 @@ WHERE [{updateKey}] > @watermark;
 
         await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@watermark", watermark ?? DBNull.Value);
-
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("SQL GetMinMax: {Sql}", sql);
         await using var rdr = await cmd.ExecuteReaderAsync();
+        sw.Stop();
+        _log.LogDebug("GetMinMax execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
         if (!await rdr.ReadAsync()) return (null, null);
 
         return (rdr.IsDBNull(0) ? null : rdr.GetValue(0),
@@ -59,7 +68,11 @@ ORDER BY {orderBy};
         cmd.Parameters.AddWithValue("@watermark", watermark ?? DBNull.Value);
 
         var rows = new List<Dictionary<string, object?>>();
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("SQL ReadNextChunk: {Sql}", sql);
         await using var rdr = await cmd.ExecuteReaderAsync();
+        sw.Stop();
+        _log.LogDebug("ReadNextChunk execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
 
         while (await rdr.ReadAsync())
         {

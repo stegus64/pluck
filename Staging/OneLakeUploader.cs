@@ -1,6 +1,7 @@
 using Azure.Storage.Files.DataLake;
 using FabricIncrementalReplicator.Auth;
 using FabricIncrementalReplicator.Config;
+using Microsoft.Extensions.Logging;
 
 namespace FabricIncrementalReplicator.Staging;
 
@@ -8,11 +9,13 @@ public sealed class OneLakeUploader
 {
     private readonly OneLakeStagingConfig _cfg;
     private readonly DataLakeServiceClient _svc;
+    private readonly Microsoft.Extensions.Logging.ILogger<OneLakeUploader> _log;
 
-    public OneLakeUploader(OneLakeStagingConfig cfg, TokenProvider tokenProvider)
+    public OneLakeUploader(OneLakeStagingConfig cfg, TokenProvider tokenProvider, Microsoft.Extensions.Logging.ILogger<OneLakeUploader>? log = null)
     {
         _cfg = cfg;
         _svc = new DataLakeServiceClient(new Uri("https://onelake.dfs.fabric.microsoft.com"), tokenProvider.Credential);
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<OneLakeUploader>.Instance;
     }
 
     public async Task TestConnectionAsync(CancellationToken ct = default)
@@ -41,11 +44,16 @@ public sealed class OneLakeUploader
         var fullPath = $"{directoryPath}/{relativeFileName}".Replace("\\", "/");
         var file = fs.GetFileClient(fullPath);
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("OneLake Upload: CreateIfNotExists for {Path}", fullPath);
         await file.CreateIfNotExistsAsync();
 
         await using var stream = File.OpenRead(localPath);
+        _log.LogDebug("OneLake Upload: Append start for {Path}", fullPath);
         await file.AppendAsync(stream, offset: 0);
         await file.FlushAsync(position: stream.Length);
+        sw.Stop();
+        _log.LogDebug("OneLake Upload elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
 
         return $"https://onelake.dfs.fabric.microsoft.com/{_cfg.WorkspaceId}/{_cfg.LakehouseId}/Files/{_cfg.FilesPath}/{relativeFileName}"
             .Replace("\\", "/");
@@ -57,6 +65,7 @@ public sealed class OneLakeUploader
         {
             var fs = _svc.GetFileSystemClient(_cfg.WorkspaceId);
             var fullPath = $"{_cfg.LakehouseId}/Files/{_cfg.FilesPath}/{relativeFileName}".Replace("\\", "/");
+            _log.LogDebug("OneLake Delete attempt: {Path}", fullPath);
             await fs.DeleteFileAsync(fullPath);
         }
         catch

@@ -5,15 +5,18 @@ using FabricIncrementalReplicator.Util;
 
 namespace FabricIncrementalReplicator.Source;
 
+using Microsoft.Extensions.Logging;
+
 public sealed class SourceSchemaReader
 {
     private readonly string _connString;
     private readonly SchemaDiscoveryConfig _cfg;
-
-    public SourceSchemaReader(string connString, SchemaDiscoveryConfig cfg)
+    private readonly ILogger<SourceSchemaReader> _log;
+    public SourceSchemaReader(string connString, SchemaDiscoveryConfig cfg, ILogger<SourceSchemaReader>? log = null)
     {
         _connString = connString;
         _cfg = cfg;
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<SourceSchemaReader>.Instance;
     }
 
     public async Task<List<SourceColumn>> DescribeQueryAsync(string sourceSql)
@@ -47,8 +50,12 @@ EXEC sp_describe_first_result_set @tsql = @q, @params = NULL, @browse_informatio
         await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@q", sourceSql);
 
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("SQL Describe (sp_describe_first_result_set): {Sql}", sql);
         var result = new List<SourceColumn>();
         await using var rdr = await cmd.ExecuteReaderAsync();
+        sw.Stop();
+        _log.LogDebug("Describe execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
 
         var nameOrd = rdr.GetOrdinal("name");
         var isHiddenOrd = rdr.GetOrdinal("is_hidden");
@@ -78,7 +85,11 @@ EXEC sp_describe_first_result_set @tsql = @q, @params = NULL, @browse_informatio
         await conn.OpenAsync();
 
         await using var cmd = new SqlCommand(sql, conn);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("SQL FMTONLY describe: {SqlSnippet}", sourceSql.Length > 200 ? sourceSql[..200] + "..." : sourceSql);
         await using var rdr = await cmd.ExecuteReaderAsync(CommandBehavior.SchemaOnly);
+        sw.Stop();
+        _log.LogDebug("FMTONLY execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
 
         var schema = rdr.GetSchemaTable();
         if (schema == null) return new();

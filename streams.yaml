@@ -1,17 +1,8 @@
 streams:
-  - name: "Customers"
-    sourceSql: "SELECT c.CustomerId, c.Name, c.ModifiedAt FROM dbo.Customers c WHERE c.Part = 123"
-    targetTable: "Customers"
+  - name: "M3_MITMAS"
+    sourceSql: "SELECT * FROM dbo.M3_MITMAS WHERE DW_Rowid <= 10000"
+    targetTable: "M3_MITMAS"
     targetSchema: "dbo"                 # overrides env default if set
-    primaryKey: ["CustomerId"]
-    updateKey: "ModifiedAt"
-    chunkSize: 50000
-
-  - name: "OrdersJoin"
-    sourceSql: "SELECT o.OrderId, o.LineId, o.ModifiedAt, c.Name as CustomerName
-                FROM dbo.Orders o
-                JOIN dbo.Customers c ON c.CustomerId = o.CustomerId"
-    targetTable: "OrdersJoin"
-    primaryKey: ["OrderId","LineId"]
-    updateKey: "ModifiedAt"
-    chunkSize: 20000
+    primaryKey: ["DW_Rowid"]
+    updateKey: "DW_Rowid"
+    chunkSize: 5000

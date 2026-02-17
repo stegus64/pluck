@@ -1,13 +1,19 @@
 using FabricIncrementalReplicator.Source;
 using FabricIncrementalReplicator.Util;
 using Microsoft.Data.SqlClient;
+using Microsoft.Extensions.Logging;
 
 namespace FabricIncrementalReplicator.Target;
 
 public sealed class WarehouseSchemaManager
 {
     private readonly WarehouseConnectionFactory _factory;
-    public WarehouseSchemaManager(WarehouseConnectionFactory factory) => _factory = factory;
+    private readonly Microsoft.Extensions.Logging.ILogger<WarehouseSchemaManager> _log;
+    public WarehouseSchemaManager(WarehouseConnectionFactory factory, Microsoft.Extensions.Logging.ILogger<WarehouseSchemaManager>? log = null)
+    {
+        _factory = factory;
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<WarehouseSchemaManager>.Instance;
+    }
 
     public async Task EnsureTableAndSchemaAsync(string schema, string table, List<SourceColumn> sourceColumns, List<string> primaryKey)
     {
@@ -48,7 +54,7 @@ END
         }
     }
 
-    private static async Task<HashSet<string>> GetTargetColumnsAsync(SqlConnection conn, string schema, string table)
+    private async Task<HashSet<string>> GetTargetColumnsAsync(SqlConnection conn, string schema, string table)
     {
         var sql = @"
 SELECT c.name
@@ -62,17 +68,26 @@ WHERE s.name = @schema AND t.name = @table;
         cmd.Parameters.AddWithValue("@table", table);
 
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("SQL GetTargetColumns: {Sql}", sql);
         await using var rdr = await cmd.ExecuteReaderAsync();
+        sw.Stop();
+        _log.LogDebug("GetTargetColumns elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
         while (await rdr.ReadAsync())
             set.Add(rdr.GetString(0));
         return set;
     }
 
-    private static async Task ExecAsync(SqlConnection conn, string sql, params (string Name, object Value)[] prms)
+    private async Task ExecAsync(SqlConnection conn, string sql, params (string Name, object Value)[] prms)
     {
         await using var cmd = new SqlCommand(sql, conn);
         foreach (var (n, v) in prms)
             cmd.Parameters.AddWithValue(n, v ?? DBNull.Value);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("SQL Exec: {Sql}", sql);
         await cmd.ExecuteNonQueryAsync();
+        sw.Stop();
+        _log.LogDebug("Exec elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
     }
 }
