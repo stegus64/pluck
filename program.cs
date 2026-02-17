@@ -113,7 +113,7 @@ public static class Program
                 return 0;
             }
 
-            foreach (var stream in streams.Streams)
+            foreach (var stream in streams.GetResolvedStreams())
             {
                 logger.LogInformation("=== Stream: {StreamName} ===", stream.Name);
                 var stagingFileFormat = NormalizeStagingFileFormat(stream.StagingFileFormat);
@@ -250,8 +250,8 @@ public static class Program
         {
             using var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(builder =>
             {
-                builder.AddSimpleConsole(options => { options.TimestampFormat = "HH:mm:ss "; options.SingleLine = true; });
-                builder.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Error);
+                builder.AddSimpleConsole(options => { options.TimestampFormat = "HH:mm:ss "; options.SingleLine = false; });
+                builder.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Critical);
             });
             var logger = loggerFactory.CreateLogger("Program");
             logger.LogCritical(ex, "Unhandled exception during replication run.");

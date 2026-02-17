@@ -1,11 +1,18 @@
-streams:
-  - name: "M3_MITMAS"
-    sourceSql: "SELECT * FROM dbo.M3_MITMAS WHERE DW_Rowid <= 600000"
-    targetTable: "M3_MITMAS"
+defaults:
     primaryKey: ["DW_Rowid"]
     updateKey: "DW_Rowid"
     chunkSize: 100000
     # "csv", "csv.gz", or "parquet"
-    # stagingFileFormat: "csv.gz"
-    stagingFileFormat: "parquet"
+    stagingFileFormat: "csv.gz"
+    # stagingFileFormat: "parquet"
     # stagingFileFormat: "csv"
+    targetTable: "{stream_table}"
+
+streams:
+  M3_MITMAS:
+    sourceSql: "SELECT * FROM dbo.M3_MITMAS WHERE DW_Rowid <= 600000"
+
+  M3_CFACIL:
+    sourceSql: "SELECT * FROM dbo.M3_CFACIL WHERE DW_Rowid <= 100000"
+    stagingFileFormat: "csv"
+  
