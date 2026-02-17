@@ -88,7 +88,7 @@ Column used for incremental chunking and watermarking.
 updateKey: "DW_Rowid"
 ```
 
-### `chunkSize` (required, can come from `defaults`)
+### `chunkSize` (optional, can come from `defaults`)
 
 Chunk interval size (not row count). Supports numeric and date/time formats.
 
@@ -108,6 +108,7 @@ Notes:
 
 - For numeric update keys, use unitless numeric values.
 - For `date`/`datetime` update keys, use time units (`h`, `d`, `m`, `y`).
+- If `chunkSize` is omitted, all rows after watermark are processed in a single chunk.
 
 ### `stagingFileFormat` (optional)
 
@@ -174,6 +175,5 @@ A stream must resolve to valid values for:
 - `targetTable`
 - `primaryKey`
 - `updateKey`
-- `chunkSize`
 
-If any are missing or invalid, the run fails early with an error.
+If required values are missing or invalid, the run fails early with an error.

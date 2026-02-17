@@ -173,7 +173,7 @@ public static class Program
                 var lowerBound = srcMin;
                 while (CompareUpdateKey(lowerBound, srcMax) <= 0)
                 {
-                    var upperBound = AddUpdateKeyInterval(lowerBound, chunkInterval);
+                    var upperBound = chunkInterval is null ? null : AddUpdateKeyInterval(lowerBound, chunkInterval);
 
                     // Local temp file
                     var runId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
@@ -184,13 +184,19 @@ public static class Program
                     Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
                     logger.LogDebug("Next chunk local staging path: {LocalPath}", localPath);
 
-                    var rowStream = sourceChunkReader.ReadChunkByIntervalAsync(
-                        stream.SourceSql,
-                        sourceColumns,
-                        stream.UpdateKey,
-                        lowerBound,
-                        upperBound
-                    );
+                    var rowStream = chunkInterval is null
+                        ? sourceChunkReader.ReadChunkFromLowerBoundAsync(
+                            stream.SourceSql,
+                            sourceColumns,
+                            stream.UpdateKey,
+                            lowerBound,
+                            srcMax)
+                        : sourceChunkReader.ReadChunkByIntervalAsync(
+                            stream.SourceSql,
+                            sourceColumns,
+                            stream.UpdateKey,
+                            lowerBound,
+                            upperBound!);
                     var writeSw = System.Diagnostics.Stopwatch.StartNew();
                     var chunkWrite = stagingFileFormat == "parquet"
                         ? await parquetWriter.WriteParquetAsync(localPath, sourceColumns, rowStream)
@@ -201,14 +207,28 @@ public static class Program
 
                     if (chunkWrite.RowCount == 0)
                     {
-                        logger.LogDebug(
-                            "No rows in interval chunk [{LowerBound}, {UpperBound}) for stream {StreamName}.",
-                            lowerBound,
-                            upperBound,
-                            stream.Name);
+                        if (chunkInterval is null)
+                        {
+                            logger.LogDebug(
+                                "No rows in single-chunk range [{LowerBound}, {MaxInclusive}] for stream {StreamName}.",
+                                lowerBound,
+                                srcMax,
+                                stream.Name);
+                        }
+                        else
+                        {
+                            logger.LogDebug(
+                                "No rows in interval chunk [{LowerBound}, {UpperBound}) for stream {StreamName}.",
+                                lowerBound,
+                                upperBound,
+                                stream.Name);
+                        }
                         if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(localPath))
                             File.Delete(localPath);
-                        lowerBound = upperBound;
+                        if (chunkInterval is null)
+                            break;
+
+                        lowerBound = upperBound!;
                         continue;
                     }
 
@@ -245,18 +265,36 @@ public static class Program
                         ? chunkWrite.RowCount / totalSeconds
                         : 0d;
 
-                    logger.LogInformation(
-                        "Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
-                        chunkIndex,
-                        chunkWrite.RowCount,
-                        lowerBound,
-                        upperBound,
-                        uploadedFileSizeKb,
-                        writeSw.Elapsed.TotalMilliseconds,
-                        uploadSw.Elapsed.TotalMilliseconds,
-                        warehouseMetrics.CopyIntoElapsed.TotalMilliseconds,
-                        warehouseMetrics.MergeElapsed.TotalMilliseconds,
-                        rowsPerSecond);
+                    if (chunkInterval is null)
+                    {
+                        logger.LogInformation(
+                            "Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, maxInclusive={MaxInclusive}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                            chunkIndex,
+                            chunkWrite.RowCount,
+                            lowerBound,
+                            srcMax,
+                            uploadedFileSizeKb,
+                            writeSw.Elapsed.TotalMilliseconds,
+                            uploadSw.Elapsed.TotalMilliseconds,
+                            warehouseMetrics.CopyIntoElapsed.TotalMilliseconds,
+                            warehouseMetrics.MergeElapsed.TotalMilliseconds,
+                            rowsPerSecond);
+                    }
+                    else
+                    {
+                        logger.LogInformation(
+                            "Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                            chunkIndex,
+                            chunkWrite.RowCount,
+                            lowerBound,
+                            upperBound,
+                            uploadedFileSizeKb,
+                            writeSw.Elapsed.TotalMilliseconds,
+                            uploadSw.Elapsed.TotalMilliseconds,
+                            warehouseMetrics.CopyIntoElapsed.TotalMilliseconds,
+                            warehouseMetrics.MergeElapsed.TotalMilliseconds,
+                            rowsPerSecond);
+                    }
 
                     // Cleanup files
                     if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(localPath))
@@ -265,7 +303,10 @@ public static class Program
                     if (envConfig.Cleanup.DeleteStagedFiles)
                         await uploader.TryDeleteAsync(fileName);
 
-                    lowerBound = upperBound;
+                    if (chunkInterval is null)
+                        break;
+
+                    lowerBound = upperBound!;
                 }
 
                 logger.LogInformation("=== Stream {StreamName} complete ===", stream.Name);
@@ -376,11 +417,11 @@ public static class Program
         };
     }
 
-    private static ChunkInterval ParseChunkInterval(string rawChunkSize, string streamName)
+    private static ChunkInterval? ParseChunkInterval(string? rawChunkSize, string streamName)
     {
         var raw = (rawChunkSize ?? string.Empty).Trim().ToLowerInvariant();
         if (string.IsNullOrWhiteSpace(raw))
-            throw new Exception($"Missing chunkSize for stream '{streamName}'.");
+            return null;
 
         var m = Regex.Match(raw, @"^(?<num>\d+)\s*(?<unit>[a-z]*)$");
         if (!m.Success)

@@ -89,4 +89,49 @@ WHERE [{updateKey}] >= @lowerBound
             yield return values;
         }
     }
+
+    public async IAsyncEnumerable<object?[]> ReadChunkFromLowerBoundAsync(
+        string sourceSql,
+        List<SourceColumn> columns,
+        string updateKey,
+        object lowerBoundInclusive,
+        object maxInclusive,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var selectList = string.Join(", ", columns.Select(c => $"[{c.Name}]"));
+
+        var sql = $@"
+WITH src AS (
+    {sourceSql}
+)
+SELECT {selectList}
+FROM src
+WHERE [{updateKey}] >= @lowerBound
+  AND [{updateKey}] <= @maxInclusive;
+";
+
+        await using var conn = new SqlConnection(_connString);
+        await conn.OpenAsync(ct);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _commandTimeoutSeconds;
+        cmd.Parameters.AddWithValue("@lowerBound", lowerBoundInclusive);
+        cmd.Parameters.AddWithValue("@maxInclusive", maxInclusive);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("SQL ReadChunkFromLowerBound: {Sql}", sql);
+        _log.LogDebug("SQL ReadChunkFromLowerBound Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
+        await using var rdr = await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess, ct);
+        sw.Stop();
+        _log.LogDebug("ReadChunkFromLowerBound execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+
+        while (await rdr.ReadAsync(ct))
+        {
+            var values = new object?[columns.Count];
+            for (int i = 0; i < columns.Count; i++)
+                values[i] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+
+            yield return values;
+        }
+    }
 }
