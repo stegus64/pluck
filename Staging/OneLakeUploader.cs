@@ -29,7 +29,7 @@ public sealed class OneLakeUploader
         var fullPath = $"{directoryPath}/{relativeFileName}".Replace("\\", "/");
         var file = fs.GetFileClient(fullPath);
 
-        await file.CreateIfNotExistsAsync(overwrite: true);
+        await file.CreateIfNotExistsAsync();
 
         await using var stream = File.OpenRead(localPath);
         await file.AppendAsync(stream, offset: 0);

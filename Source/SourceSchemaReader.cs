@@ -1,3 +1,4 @@
+using System.Data;
 using Microsoft.Data.SqlClient;
 using FabricIncrementalReplicator.Config;
 using FabricIncrementalReplicator.Util;
@@ -105,7 +106,7 @@ public sealed record SourceColumn(
     {
         // system_type_name often includes nullability and collation; we keep it simple.
         // Example: "nvarchar(100)"
-        return new SourceColumn(name, Normalize(systemTypeName), isNullable: true);
+        return new SourceColumn(name, Normalize(systemTypeName), IsNullable: true);
     }
 
     public static SourceColumn FromAdoSchema(string name, Type? dataType, object? providerType)
@@ -114,7 +115,7 @@ public sealed record SourceColumn(
         var type = dataType?.Name ?? "Object";
         // Minimal mapping; TypeMapper handles real DDL mapping later.
         var sqlType = TypeMapper.AdoTypeToSqlServerType(type);
-        return new SourceColumn(name, sqlType, isNullable: true);
+        return new SourceColumn(name, sqlType, IsNullable: true);
     }
 
     private static string Normalize(string systemTypeName)
