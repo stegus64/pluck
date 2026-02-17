@@ -7,8 +7,17 @@ public static class TypeMapper
     {
         var t = sqlServerType.Trim().ToLowerInvariant();
 
+        // This warehouse endpoint rejects Unicode string types (nchar/nvarchar).
+        // Normalize them to varchar-compatible equivalents.
+        if (t.StartsWith("nvarchar("))
+            return "varchar" + t["nvarchar".Length..];
+        if (t.StartsWith("nchar("))
+            return "varchar" + t["nchar".Length..];
+        if (t.StartsWith("char("))
+            return "varchar" + t["char".Length..];
+
         // pass-through common types
-        if (t.StartsWith("nvarchar") || t.StartsWith("varchar") || t.StartsWith("nchar") || t.StartsWith("char"))
+        if (t.StartsWith("varchar"))
             return t;
         if (t.StartsWith("varbinary") || t.StartsWith("binary"))
             return t;

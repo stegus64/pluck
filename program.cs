@@ -42,6 +42,8 @@ public static class Program
                 builder.SetMinimumLevel(minLogLevel);
             });
 
+            var logger = loggerFactory.CreateLogger("Program");
+
             var testConnectionsFlag = args.Any(a => a.Equals("--test-connections", StringComparison.OrdinalIgnoreCase));
 
             var sourceSchemaReader = new SourceSchemaReader(envConfig.SourceSql.ConnectionString, envConfig.SchemaDiscovery, loggerFactory.CreateLogger<SourceSchemaReader>());
@@ -56,17 +58,17 @@ public static class Program
 
             if (testConnectionsFlag)
             {
-                Console.WriteLine("Running connection tests...");
+                logger.LogInformation("Running connection tests...");
 
                 // 1) Test SQL connection (open/close)
                 try
                 {
                     using var conn = await warehouseConnFactory.OpenAsync();
-                    Console.WriteLine("SQL Warehouse: OK");
+                    logger.LogInformation("SQL Warehouse: OK");
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"SQL Warehouse: FAILED - {ex.Message}");
+                    logger.LogError(ex, "SQL Warehouse: FAILED");
                     return 2;
                 }
 
@@ -74,21 +76,21 @@ public static class Program
                 try
                 {
                     await uploader.TestConnectionAsync();
-                    Console.WriteLine("OneLake staging: OK");
+                    logger.LogInformation("OneLake staging: OK");
                 }
                 catch (Exception ex)
                 {
-                    Console.Error.WriteLine($"OneLake staging: FAILED - {ex.Message}");
+                    logger.LogError(ex, "OneLake staging: FAILED");
                     return 3;
                 }
 
-                Console.WriteLine("All connection checks passed.");
+                logger.LogInformation("All connection checks passed.");
                 return 0;
             }
 
             foreach (var stream in streams.Streams)
             {
-                Console.WriteLine($"=== Stream: {stream.Name} ===");
+                logger.LogInformation("=== Stream: {StreamName} ===", stream.Name);
 
                 var targetSchema = stream.TargetSchema ?? envConfig.FabricWarehouse.TargetSchema ?? "dbo";
                 var targetTable = stream.TargetTable;
@@ -109,11 +111,11 @@ public static class Program
 
                 // 3) Read watermark from target
                 object? targetMax = await loaderTarget.GetMaxUpdateKeyAsync(targetSchema, targetTable, stream.UpdateKey);
-                Console.WriteLine($"Target watermark (max {stream.UpdateKey}) = {targetMax ?? "NULL"}");
+                logger.LogInformation("Target watermark (max {UpdateKey}) = {TargetMax}", stream.UpdateKey, targetMax ?? "NULL");
 
                 // 4) Optional logging: source min/max after watermark
                 var (srcMin, srcMax) = await sourceChunkReader.GetMinMaxUpdateKeyAsync(stream.SourceSql, stream.UpdateKey, targetMax);
-                Console.WriteLine($"Source range after watermark: min={srcMin ?? "NULL"}, max={srcMax ?? "NULL"}");
+                logger.LogInformation("Source range after watermark: min={SourceMin}, max={SourceMax}", srcMin ?? "NULL", srcMax ?? "NULL");
 
                 // 5) Chunk loop (TOP N ordered)
                 var chunkIndex = 0;
@@ -132,12 +134,12 @@ public static class Program
 
                     if (chunkRows.Count == 0)
                     {
-                        Console.WriteLine("No more rows.");
+                        logger.LogInformation("No more rows.");
                         break;
                     }
 
                     chunkIndex++;
-                    Console.WriteLine($"Chunk {chunkIndex}: rows={chunkRows.Count}");
+                    logger.LogInformation("Chunk {ChunkIndex}: rows={RowCount}", chunkIndex, chunkRows.Count);
 
                     // Determine new watermark = max(updateKey) in this chunk
                     watermark = SourceChunkReader.GetMaxValue(chunkRows, stream.UpdateKey);
@@ -175,17 +177,23 @@ public static class Program
                     if (envConfig.Cleanup.DeleteStagedFiles)
                         await uploader.TryDeleteAsync(fileName);
 
-                    Console.WriteLine($"Chunk {chunkIndex} done. New watermark={watermark}");
+                    logger.LogInformation("Chunk {ChunkIndex} done. New watermark={Watermark}", chunkIndex, watermark);
                 }
 
-                Console.WriteLine($"=== Stream {stream.Name} complete ===");
+                logger.LogInformation("=== Stream {StreamName} complete ===", stream.Name);
             }
 
             return 0;
         }
         catch (Exception ex)
         {
-            Console.Error.WriteLine(ex);
+            using var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(builder =>
+            {
+                builder.AddSimpleConsole(options => { options.TimestampFormat = "HH:mm:ss "; options.SingleLine = true; });
+                builder.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Error);
+            });
+            var logger = loggerFactory.CreateLogger("Program");
+            logger.LogCritical(ex, "Unhandled exception during replication run.");
             return 1;
         }
     }

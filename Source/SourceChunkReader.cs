@@ -21,7 +21,7 @@ WITH src AS (
 )
 SELECT MIN([{updateKey}]) AS MinVal, MAX([{updateKey}]) AS MaxVal
 FROM src
-WHERE [{updateKey}] > @watermark;
+WHERE (@watermark IS NULL OR [{updateKey}] > @watermark);
 ";
         await using var conn = new SqlConnection(_connString);
         await conn.OpenAsync();
@@ -47,8 +47,11 @@ WHERE [{updateKey}] > @watermark;
         object? watermark,
         int chunkSize)
     {
-        var orderBy = string.Join(", ",
-            new[] { updateKey }.Concat(primaryKey).Select(c => $"[{c}] ASC"));
+        var orderCols = new[] { updateKey }
+            .Concat(primaryKey)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var orderBy = string.Join(", ", orderCols.Select(c => $"[{c}] ASC"));
 
         var sql = $@"
 WITH src AS (
@@ -56,7 +59,7 @@ WITH src AS (
 )
 SELECT TOP (@chunkSize) *
 FROM src
-WHERE [{updateKey}] > @watermark
+WHERE (@watermark IS NULL OR [{updateKey}] > @watermark)
 ORDER BY {orderBy};
 ";
 
