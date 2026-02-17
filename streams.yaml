@@ -2,7 +2,6 @@ streams:
   - name: "M3_MITMAS"
     sourceSql: "SELECT * FROM dbo.M3_MITMAS WHERE DW_Rowid <= 10000"
     targetTable: "M3_MITMAS"
-    targetSchema: "dbo"                 # overrides env default if set
     primaryKey: ["DW_Rowid"]
     updateKey: "DW_Rowid"
     chunkSize: 5000
