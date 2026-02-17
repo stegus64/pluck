@@ -14,6 +14,6 @@ public sealed class StreamConfig
     public List<string> PrimaryKey { get; set; } = new();
     public string UpdateKey { get; set; } = "";
     public int ChunkSize { get; set; } = 50000;
-    // Supported values: "csv.gz" (default), "parquet"
+    // Supported values: "csv.gz" (default), "csv", "parquet"
     public string StagingFileFormat { get; set; } = "csv.gz";
 }

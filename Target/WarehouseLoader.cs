@@ -101,10 +101,13 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
     {
         var f = (stagingFileFormat ?? "csv.gz").Trim().ToLowerInvariant();
         var isParquet = f is "parquet" or "pq";
+        var isUncompressedCsv = f is "csv";
 
         var withClause = isParquet
             ? "FILE_TYPE = 'PARQUET'"
-            : "FILE_TYPE = 'CSV',\n    COMPRESSION = 'GZIP',\n    FIRSTROW = 2,\n    FIELDTERMINATOR = ',',\n    ROWTERMINATOR = '0x0A'";
+            : isUncompressedCsv
+                ? "FILE_TYPE = 'CSV',\n    FIRSTROW = 2,\n    FIELDTERMINATOR = ',',\n    ROWTERMINATOR = '0x0A'"
+                : "FILE_TYPE = 'CSV',\n    COMPRESSION = 'GZIP',\n    FIRSTROW = 2,\n    FIELDTERMINATOR = ',',\n    ROWTERMINATOR = '0x0A'";
 
         return $@"
 COPY INTO [{targetSchema}].[{tempTable}] ({colList})

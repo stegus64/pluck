@@ -1,10 +1,11 @@
 streams:
   - name: "M3_MITMAS"
-    sourceSql: "SELECT * FROM dbo.M3_MITMAS WHERE DW_Rowid <= 2000000"
+    sourceSql: "SELECT * FROM dbo.M3_MITMAS WHERE DW_Rowid <= 600000"
     targetTable: "M3_MITMAS"
     primaryKey: ["DW_Rowid"]
     updateKey: "DW_Rowid"
-    chunkSize: 1000000
-    # "csv.gz" or "parquet"
-    # stagingFileFormat: "csv.gz" # or "parquet"
+    chunkSize: 100000
+    # "csv", "csv.gz", or "parquet"
+    # stagingFileFormat: "csv.gz"
     stagingFileFormat: "parquet"
+    # stagingFileFormat: "csv"

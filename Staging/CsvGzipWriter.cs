@@ -10,16 +10,35 @@ public sealed record ChunkWriteResult(int RowCount, object? MaxUpdateKey);
 
 public sealed class CsvGzipWriter
 {
+    public Task<ChunkWriteResult> WriteCsvAsync(
+        string path,
+        List<SourceColumn> columns,
+        IAsyncEnumerable<object?[]> rows,
+        int updateKeyIndex,
+        CancellationToken ct = default)
+        => WriteCsvInternalAsync(path, columns, rows, updateKeyIndex, compress: false, ct);
+
     public async Task<ChunkWriteResult> WriteCsvGzAsync(
         string path,
         List<SourceColumn> columns,
         IAsyncEnumerable<object?[]> rows,
         int updateKeyIndex,
         CancellationToken ct = default)
+        => await WriteCsvInternalAsync(path, columns, rows, updateKeyIndex, compress: true, ct);
+
+    private static async Task<ChunkWriteResult> WriteCsvInternalAsync(
+        string path,
+        List<SourceColumn> columns,
+        IAsyncEnumerable<object?[]> rows,
+        int updateKeyIndex,
+        bool compress,
+        CancellationToken ct)
     {
         await using var fs = File.Create(path);
-        await using var gz = new GZipStream(fs, CompressionLevel.Optimal, leaveOpen: false);
-        await using var sw = new StreamWriter(gz);
+        await using var output = compress
+            ? new GZipStream(fs, CompressionLevel.Optimal, leaveOpen: false) as Stream
+            : fs;
+        await using var sw = new StreamWriter(output);
 
         var cfg = new CsvConfiguration(CultureInfo.InvariantCulture)
         {

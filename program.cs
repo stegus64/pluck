@@ -152,7 +152,7 @@ public static class Program
                 {
                     // Local temp file
                     var runId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
-                    var ext = stagingFileFormat == "parquet" ? "parquet" : "csv.gz";
+                    var ext = stagingFileFormat == "parquet" ? "parquet" : (stagingFileFormat == "csv" ? "csv" : "csv.gz");
                     var fileName = $"{stream.Name}/run={runId}/chunk={(chunkIndex + 1):D6}.{ext}";
 
                     var localPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"chunk.{ext}");
@@ -173,7 +173,9 @@ public static class Program
                     var writeSw = System.Diagnostics.Stopwatch.StartNew();
                     var chunkWrite = stagingFileFormat == "parquet"
                         ? await parquetWriter.WriteParquetAsync(localPath, sourceColumns, rowStream, updateKeyIndex)
-                        : await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream, updateKeyIndex);
+                        : stagingFileFormat == "csv"
+                            ? await csvWriter.WriteCsvAsync(localPath, sourceColumns, rowStream, updateKeyIndex)
+                            : await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream, updateKeyIndex);
                     writeSw.Stop();
 
                     if (chunkWrite.RowCount == 0)
@@ -272,12 +274,12 @@ public static class Program
         var normalized = (value ?? "csv.gz").Trim().ToLowerInvariant();
         return normalized switch
         {
-            "csv" => "csv.gz",
+            "csv" => "csv",
             "csv.gz" => "csv.gz",
             "gz" => "csv.gz",
             "parquet" => "parquet",
             "pq" => "parquet",
-            _ => throw new Exception($"Unsupported staging file format '{value}'. Supported values: csv.gz, parquet.")
+            _ => throw new Exception($"Unsupported staging file format '{value}'. Supported values: csv, csv.gz, parquet.")
         };
     }
 }
