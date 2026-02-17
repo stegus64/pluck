@@ -1,6 +1,6 @@
 streams:
   - name: "M3_MITMAS"
-    sourceSql: "SELECT * FROM dbo.M3_MITMAS WHERE DW_Rowid <= 1000000"
+    sourceSql: "SELECT * FROM dbo.M3_MITMAS WHERE DW_Rowid <= 1500000"
     targetTable: "M3_MITMAS"
     primaryKey: ["DW_Rowid"]
     updateKey: "DW_Rowid"

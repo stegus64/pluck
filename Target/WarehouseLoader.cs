@@ -6,6 +6,8 @@ using Microsoft.Extensions.Logging;
 
 namespace FabricIncrementalReplicator.Target;
 
+public sealed record WarehouseChunkMetrics(TimeSpan CopyIntoElapsed, TimeSpan MergeElapsed);
+
 public sealed class WarehouseLoader
 {
     private readonly WarehouseConnectionFactory _factory;
@@ -29,7 +31,7 @@ public sealed class WarehouseLoader
         return v is DBNull ? null : v;
     }
 
-    public async Task LoadAndMergeAsync(
+    public async Task<WarehouseChunkMetrics> LoadAndMergeAsync(
         string targetSchema,
         string targetTable,
         string tempTable,
@@ -66,7 +68,7 @@ WITH (
 );
 ";
         _log.LogDebug("COPY INTO SQL: {Sql}", copySql);
-        await ExecAsync(conn, copySql);
+        var copyIntoElapsed = await ExecAsync(conn, copySql);
 
         // 3) Verify rows loaded into temp table match source chunk rows
         var loadedRowCount = await GetTableRowCountAsync(conn, targetSchema, tempTable);
@@ -77,7 +79,7 @@ WITH (
                 $"Source rows={expectedRowCount}, temp table rows={loadedRowCount}.");
         }
 
-        _log.LogInformation(
+        _log.LogDebug(
             "Chunk row count verified for temp table [{Schema}].[{Table}]: {RowCount} rows.",
             targetSchema,
             tempTable,
@@ -86,7 +88,7 @@ WITH (
         // 4) MERGE into target (MERGE supported in Fabric Warehouse per official surface area) :contentReference[oaicite:9]{index=9}
         var mergeSql = MergeBuilder.BuildMergeSql(targetSchema, targetTable, tempTable, columns, primaryKey);
         _log.LogDebug("MERGE SQL: {Sql}", mergeSql);
-        await ExecAsync(conn, mergeSql);
+        var mergeElapsed = await ExecAsync(conn, mergeSql);
 
         // 5) Cleanup temp table
         if (cleanup.DropTempTables)
@@ -94,15 +96,18 @@ WITH (
             var dropSql = $@"DROP TABLE [{targetSchema}].[{tempTable}];";
             await ExecAsync(conn, dropSql);
         }
+
+        return new WarehouseChunkMetrics(copyIntoElapsed, mergeElapsed);
     }
 
-    private async Task ExecAsync(SqlConnection conn, string sql)
+    private async Task<TimeSpan> ExecAsync(SqlConnection conn, string sql)
     {
         await using var cmd = new SqlCommand(sql, conn);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await cmd.ExecuteNonQueryAsync();
         sw.Stop();
         _log.LogDebug("Exec elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        return sw.Elapsed;
     }
 
     private static async Task<int> GetTableRowCountAsync(SqlConnection conn, string schema, string table)

@@ -159,7 +159,9 @@ public static class Program
                         watermark,
                         stream.ChunkSize
                     );
+                    var writeSw = System.Diagnostics.Stopwatch.StartNew();
                     var chunkWrite = await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream, updateKeyIndex);
+                    writeSw.Stop();
 
                     if (chunkWrite.RowCount == 0)
                     {
@@ -170,17 +172,18 @@ public static class Program
                     }
 
                     chunkIndex++;
-                    logger.LogInformation("Chunk {ChunkIndex}: rows={RowCount}", chunkIndex, chunkWrite.RowCount);
                     watermark = chunkWrite.MaxUpdateKey;
 
                     // Upload to staging lake path...
+                    var uploadSw = System.Diagnostics.Stopwatch.StartNew();
                     var oneLakePath = await uploader.UploadAsync(localPath, fileName);
+                    uploadSw.Stop();
 
                     // Temp table name
                     var tempTable = $"__tmp_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
 
                     // Load into temp table & merge
-                    await loaderTarget.LoadAndMergeAsync(
+                    var warehouseMetrics = await loaderTarget.LoadAndMergeAsync(
                         targetSchema: targetSchema,
                         targetTable: targetTable,
                         tempTable: tempTable,
@@ -191,6 +194,26 @@ public static class Program
                         cleanup: envConfig.Cleanup
                     );
 
+                    var totalSeconds =
+                        writeSw.Elapsed.TotalSeconds +
+                        uploadSw.Elapsed.TotalSeconds +
+                        warehouseMetrics.CopyIntoElapsed.TotalSeconds +
+                        warehouseMetrics.MergeElapsed.TotalSeconds;
+                    var rowsPerSecond = totalSeconds > 0
+                        ? chunkWrite.RowCount / totalSeconds
+                        : 0d;
+
+                    logger.LogInformation(
+                        "Chunk {ChunkIndex}: rows={RowCount}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}, watermark={Watermark}",
+                        chunkIndex,
+                        chunkWrite.RowCount,
+                        writeSw.Elapsed.TotalMilliseconds,
+                        uploadSw.Elapsed.TotalMilliseconds,
+                        warehouseMetrics.CopyIntoElapsed.TotalMilliseconds,
+                        warehouseMetrics.MergeElapsed.TotalMilliseconds,
+                        rowsPerSecond,
+                        watermark);
+
                     // Cleanup files
                     if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(localPath))
                         File.Delete(localPath);
@@ -198,7 +221,6 @@ public static class Program
                     if (envConfig.Cleanup.DeleteStagedFiles)
                         await uploader.TryDeleteAsync(fileName);
 
-                    logger.LogInformation("Chunk {ChunkIndex} done. New watermark={Watermark}", chunkIndex, watermark);
                 }
 
                 logger.LogInformation("=== Stream {StreamName} complete ===", stream.Name);
