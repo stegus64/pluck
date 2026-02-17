@@ -7,12 +7,10 @@ defaults:
     # stagingFileFormat: "parquet"
     # stagingFileFormat: "csv"
     targetTable: "{stream_table}"
+    sourceSql: "SELECT * FROM dbo.{stream_table} WHERE DW_Rowid <= 920000"
 
 streams:
   M3_MITMAS:
-    sourceSql: "SELECT * FROM dbo.M3_MITMAS WHERE DW_Rowid <= 600000"
-
+    excludeColumns: ["DW_Version"]
   M3_CFACIL:
-    sourceSql: "SELECT * FROM dbo.M3_CFACIL WHERE DW_Rowid <= 100000"
-    stagingFileFormat: "csv"
   

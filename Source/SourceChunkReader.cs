@@ -45,29 +45,24 @@ WHERE (@watermark IS NULL OR [{updateKey}] > @watermark);
                 rdr.IsDBNull(1) ? null : rdr.GetValue(1));
     }
 
-    public async IAsyncEnumerable<object?[]> ReadNextChunkStreamAsync(
+    public async IAsyncEnumerable<object?[]> ReadChunkByIntervalAsync(
         string sourceSql,
         List<SourceColumn> columns,
         string updateKey,
-        List<string> primaryKey,
-        object? watermark,
-        int chunkSize,
+        object lowerBoundInclusive,
+        object upperBoundExclusive,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
-        var orderCols = new[] { updateKey }
-            .Concat(primaryKey)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-        var orderBy = string.Join(", ", orderCols.Select(c => $"[{c}] ASC"));
+        var selectList = string.Join(", ", columns.Select(c => $"[{c.Name}]"));
 
         var sql = $@"
 WITH src AS (
     {sourceSql}
 )
-SELECT TOP (@chunkSize) *
+SELECT {selectList}
 FROM src
-WHERE (@watermark IS NULL OR [{updateKey}] > @watermark)
-ORDER BY {orderBy};
+WHERE [{updateKey}] >= @lowerBound
+  AND [{updateKey}] < @upperBound;
 ";
 
         await using var conn = new SqlConnection(_connString);
@@ -75,15 +70,15 @@ ORDER BY {orderBy};
 
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _commandTimeoutSeconds;
-        cmd.Parameters.AddWithValue("@chunkSize", chunkSize);
-        cmd.Parameters.AddWithValue("@watermark", watermark ?? DBNull.Value);
+        cmd.Parameters.AddWithValue("@lowerBound", lowerBoundInclusive);
+        cmd.Parameters.AddWithValue("@upperBound", upperBoundExclusive);
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogDebug("SQL ReadNextChunk: {Sql}", sql);
-        _log.LogDebug("SQL ReadNextChunk Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
+        _log.LogDebug("SQL ReadChunkByInterval: {Sql}", sql);
+        _log.LogDebug("SQL ReadChunkByInterval Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
         await using var rdr = await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess, ct);
         sw.Stop();
-        _log.LogDebug("ReadNextChunk execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        _log.LogDebug("ReadChunkByInterval execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
 
         while (await rdr.ReadAsync(ct))
         {

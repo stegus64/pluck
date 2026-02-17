@@ -25,7 +25,9 @@ public sealed class StreamConfig
     public string? TargetTable { get; set; }
     public string? TargetSchema { get; set; }
     public List<string>? PrimaryKey { get; set; }
+    public List<string>? ExcludeColumns { get; set; }
     public string? UpdateKey { get; set; }
+    // Update-key interval size (not row count).
     public int? ChunkSize { get; set; }
     // Supported values: "csv.gz" (default), "csv", "parquet"
     public string? StagingFileFormat { get; set; }
@@ -38,6 +40,7 @@ public sealed class StreamConfig
             TargetTable = streamOverride?.TargetTable ?? defaults.TargetTable,
             TargetSchema = streamOverride?.TargetSchema ?? defaults.TargetSchema,
             PrimaryKey = streamOverride?.PrimaryKey ?? defaults.PrimaryKey,
+            ExcludeColumns = streamOverride?.ExcludeColumns ?? defaults.ExcludeColumns,
             UpdateKey = streamOverride?.UpdateKey ?? defaults.UpdateKey,
             ChunkSize = streamOverride?.ChunkSize ?? defaults.ChunkSize,
             StagingFileFormat = streamOverride?.StagingFileFormat ?? defaults.StagingFileFormat
@@ -51,6 +54,8 @@ public sealed class StreamConfig
 
         if (merged.PrimaryKey is not null)
             merged.PrimaryKey = merged.PrimaryKey.Select(k => ApplyToken(k, streamName) ?? k).ToList();
+        if (merged.ExcludeColumns is not null)
+            merged.ExcludeColumns = merged.ExcludeColumns.Select(k => ApplyToken(k, streamName) ?? k).ToList();
 
         return merged;
     }
@@ -77,6 +82,7 @@ public sealed class StreamConfig
             TargetTable = TargetTable,
             TargetSchema = string.IsNullOrWhiteSpace(TargetSchema) ? null : TargetSchema,
             PrimaryKey = PrimaryKey,
+            ExcludeColumns = ExcludeColumns ?? new List<string>(),
             UpdateKey = UpdateKey,
             ChunkSize = chunkSize,
             StagingFileFormat = string.IsNullOrWhiteSpace(StagingFileFormat) ? "csv.gz" : StagingFileFormat
@@ -99,6 +105,7 @@ public sealed class ResolvedStreamConfig
     public string TargetTable { get; set; } = "";
     public string? TargetSchema { get; set; }
     public List<string> PrimaryKey { get; set; } = new();
+    public List<string> ExcludeColumns { get; set; } = new();
     public string UpdateKey { get; set; } = "";
     public int ChunkSize { get; set; } = 50000;
     public string StagingFileFormat { get; set; } = "csv.gz";

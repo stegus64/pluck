@@ -29,7 +29,6 @@ public sealed class ParquetChunkWriter
         string path,
         List<SourceColumn> columns,
         IAsyncEnumerable<object?[]> rows,
-        int updateKeyIndex,
         CancellationToken ct = default)
     {
         var plans = columns
@@ -43,7 +42,6 @@ public sealed class ParquetChunkWriter
         var schema = new ParquetSchema(plans.Select(p => (Field)p.Field).ToArray());
 
         var rowCount = 0;
-        object? maxUpdateKey = null;
         FileStream? fs = null;
         ParquetWriter? parquetWriter = null;
 
@@ -62,9 +60,6 @@ public sealed class ParquetChunkWriter
 
                 rowCount++;
 
-                if (updateKeyIndex >= 0 && updateKeyIndex < row.Length && row[updateKeyIndex] is not null)
-                    maxUpdateKey = row[updateKeyIndex];
-
                 if (plans[0].Buffer.Count >= RowGroupSize)
                     await FlushRowGroupAsync(parquetWriter, plans, ct);
             }
@@ -79,7 +74,7 @@ public sealed class ParquetChunkWriter
                 await fs.DisposeAsync();
         }
 
-        return new ChunkWriteResult(rowCount, maxUpdateKey);
+        return new ChunkWriteResult(rowCount);
     }
 
     private static ColumnKind GetColumnKind(string sqlServerTypeName)

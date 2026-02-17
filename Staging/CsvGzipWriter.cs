@@ -6,7 +6,7 @@ using FabricIncrementalReplicator.Source;
 
 namespace FabricIncrementalReplicator.Staging;
 
-public sealed record ChunkWriteResult(int RowCount, object? MaxUpdateKey);
+public sealed record ChunkWriteResult(int RowCount);
 
 public sealed class CsvGzipWriter
 {
@@ -14,23 +14,20 @@ public sealed class CsvGzipWriter
         string path,
         List<SourceColumn> columns,
         IAsyncEnumerable<object?[]> rows,
-        int updateKeyIndex,
         CancellationToken ct = default)
-        => WriteCsvInternalAsync(path, columns, rows, updateKeyIndex, compress: false, ct);
+        => WriteCsvInternalAsync(path, columns, rows, compress: false, ct);
 
     public async Task<ChunkWriteResult> WriteCsvGzAsync(
         string path,
         List<SourceColumn> columns,
         IAsyncEnumerable<object?[]> rows,
-        int updateKeyIndex,
         CancellationToken ct = default)
-        => await WriteCsvInternalAsync(path, columns, rows, updateKeyIndex, compress: true, ct);
+        => await WriteCsvInternalAsync(path, columns, rows, compress: true, ct);
 
     private static async Task<ChunkWriteResult> WriteCsvInternalAsync(
         string path,
         List<SourceColumn> columns,
         IAsyncEnumerable<object?[]> rows,
-        int updateKeyIndex,
         bool compress,
         CancellationToken ct)
     {
@@ -55,7 +52,6 @@ public sealed class CsvGzipWriter
 
         // Rows
         var rowCount = 0;
-        object? maxUpdateKey = null;
 
         await foreach (var r in rows.WithCancellation(ct))
         {
@@ -64,11 +60,8 @@ public sealed class CsvGzipWriter
 
             await csv.NextRecordAsync();
             rowCount++;
-
-            if (updateKeyIndex >= 0 && updateKeyIndex < r.Length && r[updateKeyIndex] is not null)
-                maxUpdateKey = r[updateKeyIndex];
         }
         await sw.FlushAsync();
-        return new ChunkWriteResult(rowCount, maxUpdateKey);
+        return new ChunkWriteResult(rowCount);
     }
 }

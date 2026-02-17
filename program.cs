@@ -124,6 +124,19 @@ public static class Program
 
                 // 1) Discover schema of the source query
                 var sourceColumns = await sourceSchemaReader.DescribeQueryAsync(stream.SourceSql);
+                var excludedColumns = new HashSet<string>(stream.ExcludeColumns ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
+                if (excludedColumns.Count > 0)
+                    logger.LogInformation("Excluded columns for stream {StreamName}: {ExcludedColumns}", stream.Name, string.Join(", ", excludedColumns));
+                if (excludedColumns.Contains(stream.UpdateKey))
+                    throw new Exception($"Stream '{stream.Name}' excludes updateKey column '{stream.UpdateKey}', which is not allowed.");
+
+                var excludedPrimaryKey = stream.PrimaryKey.FirstOrDefault(pk => excludedColumns.Contains(pk));
+                if (!string.IsNullOrWhiteSpace(excludedPrimaryKey))
+                    throw new Exception($"Stream '{stream.Name}' excludes primary key column '{excludedPrimaryKey}', which is not allowed.");
+
+                sourceColumns = sourceColumns
+                    .Where(c => !excludedColumns.Contains(c.Name))
+                    .ToList();
 
                 // Validate required columns exist
                 SchemaValidator.EnsureContainsColumns(sourceColumns, stream.PrimaryKey, stream.UpdateKey);
@@ -144,12 +157,23 @@ public static class Program
                 var (srcMin, srcMax) = await sourceChunkReader.GetMinMaxUpdateKeyAsync(stream.SourceSql, stream.UpdateKey, targetMax);
                 logger.LogInformation("Source range after watermark: min={SourceMin}, max={SourceMax}", srcMin ?? "NULL", srcMax ?? "NULL");
 
-                // 5) Chunk loop (TOP N ordered)
+                // 5) Chunk loop by update-key interval
                 var chunkIndex = 0;
-                object? watermark = targetMax;
-
-                while (true)
+                if (srcMin is null || srcMax is null)
                 {
+                    logger.LogInformation("No more rows.");
+                    logger.LogInformation("=== Stream {StreamName} complete ===", stream.Name);
+                    continue;
+                }
+
+                if (stream.ChunkSize <= 0)
+                    throw new Exception($"Invalid chunkSize for stream '{stream.Name}'. Value must be > 0.");
+
+                var lowerBound = srcMin;
+                while (CompareUpdateKey(lowerBound, srcMax) <= 0)
+                {
+                    var upperBound = AddUpdateKeyInterval(lowerBound, stream.ChunkSize);
+
                     // Local temp file
                     var runId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
                     var ext = stagingFileFormat == "parquet" ? "parquet" : (stagingFileFormat == "csv" ? "csv" : "csv.gz");
@@ -159,35 +183,35 @@ public static class Program
                     Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
                     logger.LogDebug("Next chunk local staging path: {LocalPath}", localPath);
 
-                    var updateKeyIndex = sourceColumns.FindIndex(c => c.Name.Equals(stream.UpdateKey, StringComparison.OrdinalIgnoreCase));
-                    if (updateKeyIndex < 0)
-                        throw new Exception($"Update key '{stream.UpdateKey}' was not found in source column list for stream '{stream.Name}'.");
-                    var rowStream = sourceChunkReader.ReadNextChunkStreamAsync(
+                    var rowStream = sourceChunkReader.ReadChunkByIntervalAsync(
                         stream.SourceSql,
                         sourceColumns,
                         stream.UpdateKey,
-                        stream.PrimaryKey,
-                        watermark,
-                        stream.ChunkSize
+                        lowerBound,
+                        upperBound
                     );
                     var writeSw = System.Diagnostics.Stopwatch.StartNew();
                     var chunkWrite = stagingFileFormat == "parquet"
-                        ? await parquetWriter.WriteParquetAsync(localPath, sourceColumns, rowStream, updateKeyIndex)
+                        ? await parquetWriter.WriteParquetAsync(localPath, sourceColumns, rowStream)
                         : stagingFileFormat == "csv"
-                            ? await csvWriter.WriteCsvAsync(localPath, sourceColumns, rowStream, updateKeyIndex)
-                            : await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream, updateKeyIndex);
+                            ? await csvWriter.WriteCsvAsync(localPath, sourceColumns, rowStream)
+                            : await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream);
                     writeSw.Stop();
 
                     if (chunkWrite.RowCount == 0)
                     {
-                        logger.LogInformation("No more rows.");
+                        logger.LogDebug(
+                            "No rows in interval chunk [{LowerBound}, {UpperBound}) for stream {StreamName}.",
+                            lowerBound,
+                            upperBound,
+                            stream.Name);
                         if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(localPath))
                             File.Delete(localPath);
-                        break;
+                        lowerBound = upperBound;
+                        continue;
                     }
 
                     chunkIndex++;
-                    watermark = chunkWrite.MaxUpdateKey;
 
                     // Upload to staging lake path...
                     var uploadSw = System.Diagnostics.Stopwatch.StartNew();
@@ -221,16 +245,17 @@ public static class Program
                         : 0d;
 
                     logger.LogInformation(
-                        "Chunk {ChunkIndex}: rows={RowCount}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}, watermark={Watermark}",
+                        "Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
                         chunkIndex,
                         chunkWrite.RowCount,
+                        lowerBound,
+                        upperBound,
                         uploadedFileSizeKb,
                         writeSw.Elapsed.TotalMilliseconds,
                         uploadSw.Elapsed.TotalMilliseconds,
                         warehouseMetrics.CopyIntoElapsed.TotalMilliseconds,
                         warehouseMetrics.MergeElapsed.TotalMilliseconds,
-                        rowsPerSecond,
-                        watermark);
+                        rowsPerSecond);
 
                     // Cleanup files
                     if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(localPath))
@@ -239,6 +264,7 @@ public static class Program
                     if (envConfig.Cleanup.DeleteStagedFiles)
                         await uploader.TryDeleteAsync(fileName);
 
+                    lowerBound = upperBound;
                 }
 
                 logger.LogInformation("=== Stream {StreamName} complete ===", stream.Name);
@@ -281,5 +307,40 @@ public static class Program
             "pq" => "parquet",
             _ => throw new Exception($"Unsupported staging file format '{value}'. Supported values: csv, csv.gz, parquet.")
         };
+    }
+
+    private static int CompareUpdateKey(object left, object right)
+    {
+        if (left.GetType() == right.GetType() && left is IComparable comparable)
+            return comparable.CompareTo(right);
+
+        if (IsNumericType(left) && IsNumericType(right))
+            return Convert.ToDecimal(left).CompareTo(Convert.ToDecimal(right));
+
+        throw new Exception($"Unsupported updateKey type comparison: '{left.GetType().Name}' vs '{right.GetType().Name}'.");
+    }
+
+    private static object AddUpdateKeyInterval(object value, int interval)
+    {
+        return value switch
+        {
+            byte v => checked((byte)(v + interval)),
+            short v => checked((short)(v + interval)),
+            int v => checked(v + interval),
+            long v => checked(v + interval),
+            sbyte v => checked((sbyte)(v + interval)),
+            ushort v => checked((ushort)(v + interval)),
+            uint v => checked(v + (uint)interval),
+            ulong v => checked(v + (ulong)interval),
+            float v => v + interval,
+            double v => v + interval,
+            decimal v => v + interval,
+            _ => throw new Exception($"Unsupported updateKey type '{value.GetType().Name}' for interval chunking. Use a numeric updateKey.")
+        };
+    }
+
+    private static bool IsNumericType(object value)
+    {
+        return value is byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal;
     }
 }
