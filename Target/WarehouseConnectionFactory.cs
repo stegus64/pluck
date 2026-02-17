@@ -18,6 +18,8 @@ public sealed class WarehouseConnectionFactory
         _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<WarehouseConnectionFactory>.Instance;
     }
 
+    public int CommandTimeoutSeconds => _cfg.CommandTimeoutSeconds > 0 ? _cfg.CommandTimeoutSeconds : 3600;
+
     public async Task<SqlConnection> OpenAsync(CancellationToken ct = default)
     {
         var cs = new SqlConnectionStringBuilder

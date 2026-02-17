@@ -18,6 +18,7 @@ public sealed class EnvironmentConfig
 public sealed class SourceSqlConfig
 {
     public string ConnectionString { get; set; } = "";
+    public int CommandTimeoutSeconds { get; set; } = 3600;
 }
 
 public sealed class FabricWarehouseConfig
@@ -25,6 +26,7 @@ public sealed class FabricWarehouseConfig
     public string Server { get; set; } = "";   // host
     public string Database { get; set; } = "";
     public string? TargetSchema { get; set; }  // default schema
+    public int CommandTimeoutSeconds { get; set; } = 3600;
 }
 
 public sealed class OneLakeStagingConfig

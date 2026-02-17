@@ -64,6 +64,7 @@ JOIN sys.schemas s ON s.schema_id = t.schema_id
 WHERE s.name = @schema AND t.name = @table;
 ";
         await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
         cmd.Parameters.AddWithValue("@schema", schema);
         cmd.Parameters.AddWithValue("@table", table);
 
@@ -82,6 +83,7 @@ WHERE s.name = @schema AND t.name = @table;
     private async Task ExecAsync(SqlConnection conn, string sql, params (string Name, object Value)[] prms)
     {
         await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
         foreach (var (n, v) in prms)
             cmd.Parameters.AddWithValue(n, v ?? DBNull.Value);
 

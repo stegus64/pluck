@@ -8,10 +8,12 @@ namespace FabricIncrementalReplicator.Source;
 public sealed class SourceChunkReader
 {
     private readonly string _connString;
+    private readonly int _commandTimeoutSeconds;
     private readonly Microsoft.Extensions.Logging.ILogger<SourceChunkReader> _log;
-    public SourceChunkReader(string connString, Microsoft.Extensions.Logging.ILogger<SourceChunkReader>? log = null)
+    public SourceChunkReader(string connString, int commandTimeoutSeconds = 3600, Microsoft.Extensions.Logging.ILogger<SourceChunkReader>? log = null)
     {
         _connString = connString;
+        _commandTimeoutSeconds = commandTimeoutSeconds > 0 ? commandTimeoutSeconds : 3600;
         _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<SourceChunkReader>.Instance;
     }
 
@@ -29,6 +31,7 @@ WHERE (@watermark IS NULL OR [{updateKey}] > @watermark);
         await conn.OpenAsync();
 
         await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _commandTimeoutSeconds;
         cmd.Parameters.AddWithValue("@watermark", watermark ?? DBNull.Value);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         _log.LogDebug("SQL GetMinMax: {Sql}", sql);
@@ -71,6 +74,7 @@ ORDER BY {orderBy};
         await conn.OpenAsync(ct);
 
         await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _commandTimeoutSeconds;
         cmd.Parameters.AddWithValue("@chunkSize", chunkSize);
         cmd.Parameters.AddWithValue("@watermark", watermark ?? DBNull.Value);
 

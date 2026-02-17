@@ -50,8 +50,15 @@ public static class Program
 
             var testConnectionsFlag = args.Any(a => a.Equals("--test-connections", StringComparison.OrdinalIgnoreCase));
 
-            var sourceSchemaReader = new SourceSchemaReader(envConfig.SourceSql.ConnectionString, envConfig.SchemaDiscovery, loggerFactory.CreateLogger<SourceSchemaReader>());
-            var sourceChunkReader = new SourceChunkReader(envConfig.SourceSql.ConnectionString, loggerFactory.CreateLogger<SourceChunkReader>());
+            var sourceSchemaReader = new SourceSchemaReader(
+                envConfig.SourceSql.ConnectionString,
+                envConfig.SchemaDiscovery,
+                envConfig.SourceSql.CommandTimeoutSeconds,
+                loggerFactory.CreateLogger<SourceSchemaReader>());
+            var sourceChunkReader = new SourceChunkReader(
+                envConfig.SourceSql.ConnectionString,
+                envConfig.SourceSql.CommandTimeoutSeconds,
+                loggerFactory.CreateLogger<SourceChunkReader>());
 
             var uploader = new OneLakeUploader(envConfig.OneLakeStaging, tokenProvider, loggerFactory.CreateLogger<OneLakeUploader>());
             var csvWriter = new CsvGzipWriter();
@@ -184,6 +191,7 @@ public static class Program
                     var uploadSw = System.Diagnostics.Stopwatch.StartNew();
                     var oneLakePath = await uploader.UploadAsync(localPath, fileName);
                     uploadSw.Stop();
+                    var uploadedFileSizeKb = new FileInfo(localPath).Length / 1024d;
 
                     // Temp table name
                     var tempTable = $"__tmp_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
@@ -211,9 +219,10 @@ public static class Program
                         : 0d;
 
                     logger.LogInformation(
-                        "Chunk {ChunkIndex}: rows={RowCount}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}, watermark={Watermark}",
+                        "Chunk {ChunkIndex}: rows={RowCount}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}, watermark={Watermark}",
                         chunkIndex,
                         chunkWrite.RowCount,
+                        uploadedFileSizeKb,
                         writeSw.Elapsed.TotalMilliseconds,
                         uploadSw.Elapsed.TotalMilliseconds,
                         warehouseMetrics.CopyIntoElapsed.TotalMilliseconds,
