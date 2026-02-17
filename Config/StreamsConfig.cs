@@ -27,8 +27,8 @@ public sealed class StreamConfig
     public List<string>? PrimaryKey { get; set; }
     public List<string>? ExcludeColumns { get; set; }
     public string? UpdateKey { get; set; }
-    // Update-key interval size (not row count).
-    public int? ChunkSize { get; set; }
+    // Update-key interval size (not row count), e.g. "50000", "7d", "2m".
+    public string? ChunkSize { get; set; }
     // Supported values: "csv.gz" (default), "csv", "parquet"
     public string? StagingFileFormat { get; set; }
 
@@ -71,9 +71,7 @@ public sealed class StreamConfig
         if (PrimaryKey is null || PrimaryKey.Count == 0)
             throw new Exception($"Missing required stream setting 'primaryKey' for stream '{streamName}'.");
 
-        var chunkSize = ChunkSize.GetValueOrDefault(50000);
-        if (chunkSize <= 0)
-            throw new Exception($"Invalid chunkSize for stream '{streamName}'. Value must be > 0.");
+        var chunkSize = string.IsNullOrWhiteSpace(ChunkSize) ? "50000" : ChunkSize.Trim();
 
         return new ResolvedStreamConfig
         {
@@ -107,6 +105,6 @@ public sealed class ResolvedStreamConfig
     public List<string> PrimaryKey { get; set; } = new();
     public List<string> ExcludeColumns { get; set; } = new();
     public string UpdateKey { get; set; } = "";
-    public int ChunkSize { get; set; } = 50000;
+    public string ChunkSize { get; set; } = "50000";
     public string StagingFileFormat { get; set; } = "csv.gz";
 }

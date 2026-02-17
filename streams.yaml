@@ -13,4 +13,6 @@ streams:
   M3_MITMAS:
     excludeColumns: ["DW_Version"]
   M3_CFACIL:
+    updateKey: DW_InsertDatetime
+    chunkSize: 1y
   

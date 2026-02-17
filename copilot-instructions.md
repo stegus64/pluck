@@ -30,6 +30,7 @@ Guidelines for Copilot
 - Keep changes minimal and focused: modify only the files required to implement the requested feature or fix.
 - Follow existing C# style in the repo: prefer expressive, typed code and avoid unnecessary refactors.
 - When adding public APIs, update related config or loader classes in `Config/` and add small unit-style checks if applicable.
+- When configuration options are added or modified (for `connections.yaml` or `streams.yaml`), update the end-user documentation in `streams-config.md` (and any related docs) in the same change.
 - Use apply_patch semantics when creating or editing files: small, atomic patches that preserve surrounding code style.
 - Do not add new top-level frameworks or dependencies without explicit user approval.
 

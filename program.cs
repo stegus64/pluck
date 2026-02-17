@@ -6,6 +6,8 @@ using FabricIncrementalReplicator.Source;
 using FabricIncrementalReplicator.Staging;
 using FabricIncrementalReplicator.Target;
 using FabricIncrementalReplicator.Util;
+using System.Globalization;
+using System.Text.RegularExpressions;
 
 namespace FabricIncrementalReplicator;
 
@@ -166,13 +168,12 @@ public static class Program
                     continue;
                 }
 
-                if (stream.ChunkSize <= 0)
-                    throw new Exception($"Invalid chunkSize for stream '{stream.Name}'. Value must be > 0.");
+                var chunkInterval = ParseChunkInterval(stream.ChunkSize, stream.Name);
 
                 var lowerBound = srcMin;
                 while (CompareUpdateKey(lowerBound, srcMax) <= 0)
                 {
-                    var upperBound = AddUpdateKeyInterval(lowerBound, stream.ChunkSize);
+                    var upperBound = AddUpdateKeyInterval(lowerBound, chunkInterval);
 
                     // Local temp file
                     var runId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
@@ -320,22 +321,27 @@ public static class Program
         throw new Exception($"Unsupported updateKey type comparison: '{left.GetType().Name}' vs '{right.GetType().Name}'.");
     }
 
-    private static object AddUpdateKeyInterval(object value, int interval)
+    private static object AddUpdateKeyInterval(object value, ChunkInterval interval)
     {
+        if (interval.Amount <= 0)
+            throw new Exception("chunkSize must be > 0.");
+
         return value switch
         {
-            byte v => checked((byte)(v + interval)),
-            short v => checked((short)(v + interval)),
-            int v => checked(v + interval),
-            long v => checked(v + interval),
-            sbyte v => checked((sbyte)(v + interval)),
-            ushort v => checked((ushort)(v + interval)),
-            uint v => checked(v + (uint)interval),
-            ulong v => checked(v + (ulong)interval),
-            float v => v + interval,
-            double v => v + interval,
-            decimal v => v + interval,
-            _ => throw new Exception($"Unsupported updateKey type '{value.GetType().Name}' for interval chunking. Use a numeric updateKey.")
+            byte v when interval.Unit == ChunkUnit.Number => checked((byte)(v + interval.Amount)),
+            short v when interval.Unit == ChunkUnit.Number => checked((short)(v + interval.Amount)),
+            int v when interval.Unit == ChunkUnit.Number => checked(v + interval.Amount),
+            long v when interval.Unit == ChunkUnit.Number => checked(v + interval.Amount),
+            sbyte v when interval.Unit == ChunkUnit.Number => checked((sbyte)(v + interval.Amount)),
+            ushort v when interval.Unit == ChunkUnit.Number => checked((ushort)(v + interval.Amount)),
+            uint v when interval.Unit == ChunkUnit.Number => checked(v + (uint)interval.Amount),
+            ulong v when interval.Unit == ChunkUnit.Number => checked(v + (ulong)interval.Amount),
+            float v when interval.Unit == ChunkUnit.Number => v + interval.Amount,
+            double v when interval.Unit == ChunkUnit.Number => v + interval.Amount,
+            decimal v when interval.Unit == ChunkUnit.Number => v + interval.Amount,
+            DateTime v => AddDateTimeInterval(v, interval),
+            DateTimeOffset v => AddDateTimeOffsetInterval(v, interval),
+            _ => throw new Exception($"Unsupported chunking: updateKey type '{value.GetType().Name}' with chunkSize '{interval.Raw}'.")
         };
     }
 
@@ -343,4 +349,68 @@ public static class Program
     {
         return value is byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal;
     }
+
+    private static DateTime AddDateTimeInterval(DateTime value, ChunkInterval interval)
+    {
+        return interval.Unit switch
+        {
+            ChunkUnit.Day => value.AddDays(interval.Amount),
+            ChunkUnit.Month => value.AddMonths(interval.Amount),
+            ChunkUnit.Year => value.AddYears(interval.Amount),
+            ChunkUnit.Hour => value.AddHours(interval.Amount),
+            ChunkUnit.Number => throw new Exception($"chunkSize '{interval.Raw}' must include a unit for date/datetime update keys (supported: d, m, y, h)."),
+            _ => throw new Exception($"Unsupported chunkSize unit in '{interval.Raw}'.")
+        };
+    }
+
+    private static DateTimeOffset AddDateTimeOffsetInterval(DateTimeOffset value, ChunkInterval interval)
+    {
+        return interval.Unit switch
+        {
+            ChunkUnit.Day => value.AddDays(interval.Amount),
+            ChunkUnit.Month => value.AddMonths(interval.Amount),
+            ChunkUnit.Year => value.AddYears(interval.Amount),
+            ChunkUnit.Hour => value.AddHours(interval.Amount),
+            ChunkUnit.Number => throw new Exception($"chunkSize '{interval.Raw}' must include a unit for date/datetime update keys (supported: d, m, y, h)."),
+            _ => throw new Exception($"Unsupported chunkSize unit in '{interval.Raw}'.")
+        };
+    }
+
+    private static ChunkInterval ParseChunkInterval(string rawChunkSize, string streamName)
+    {
+        var raw = (rawChunkSize ?? string.Empty).Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(raw))
+            throw new Exception($"Missing chunkSize for stream '{streamName}'.");
+
+        var m = Regex.Match(raw, @"^(?<num>\d+)\s*(?<unit>[a-z]*)$");
+        if (!m.Success)
+            throw new Exception($"Invalid chunkSize '{rawChunkSize}' for stream '{streamName}'. Examples: 50000, 7d, 2m.");
+
+        if (!int.TryParse(m.Groups["num"].Value, NumberStyles.None, CultureInfo.InvariantCulture, out var amount) || amount <= 0)
+            throw new Exception($"Invalid chunkSize '{rawChunkSize}' for stream '{streamName}'. Amount must be a positive integer.");
+
+        var unitText = m.Groups["unit"].Value;
+        var unit = unitText switch
+        {
+            "" => ChunkUnit.Number,
+            "d" => ChunkUnit.Day,
+            "m" => ChunkUnit.Month,
+            "y" => ChunkUnit.Year,
+            "h" => ChunkUnit.Hour,
+            _ => throw new Exception($"Unsupported chunkSize unit '{unitText}' for stream '{streamName}'. Supported units: d, m, y, h.")
+        };
+
+        return new ChunkInterval(raw, amount, unit);
+    }
+
+    private enum ChunkUnit
+    {
+        Number,
+        Hour,
+        Day,
+        Month,
+        Year
+    }
+
+    private sealed record ChunkInterval(string Raw, int Amount, ChunkUnit Unit);
 }
