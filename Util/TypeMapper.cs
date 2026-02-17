@@ -2,17 +2,19 @@ namespace FabricIncrementalReplicator.Util;
 
 public static class TypeMapper
 {
+    private const int FabricVarcharMaxBytes = 8000;
+
     // Basic mapping: SQL Server -> Fabric Warehouse types (mostly compatible T-SQL).
     public static string SqlServerToFabricWarehouseType(string sqlServerType)
     {
         var t = sqlServerType.Trim().ToLowerInvariant();
 
         // This warehouse endpoint rejects Unicode string types (nchar/nvarchar).
-        // Normalize them to varchar-compatible equivalents.
+        // Normalize them to varchar-compatible equivalents and scale length in bytes.
         if (t.StartsWith("nvarchar("))
-            return "varchar" + t["nvarchar".Length..];
+            return ConvertUnicodeTypeToVarchar(t, "nvarchar");
         if (t.StartsWith("nchar("))
-            return "varchar" + t["nchar".Length..];
+            return ConvertUnicodeTypeToVarchar(t, "nchar");
         if (t.StartsWith("char("))
             return "varchar" + t["char".Length..];
 
@@ -30,6 +32,24 @@ public static class TypeMapper
 
         // Fallback to nvarchar(max) for unknown expression types
         return "nvarchar(max)";
+    }
+
+    private static string ConvertUnicodeTypeToVarchar(string normalizedType, string sourceTypeName)
+    {
+        var openParen = normalizedType.IndexOf('(');
+        var closeParen = normalizedType.IndexOf(')', openParen + 1);
+        if (openParen < 0 || closeParen <= openParen)
+            return "varchar(max)";
+
+        var sizeToken = normalizedType.Substring(openParen + 1, closeParen - openParen - 1).Trim();
+        if (sizeToken.Equals("max", StringComparison.OrdinalIgnoreCase))
+            return "varchar(max)";
+
+        if (!int.TryParse(sizeToken, out var unicodeLength) || unicodeLength <= 0)
+            throw new ArgumentException($"Invalid {sourceTypeName} length in type '{normalizedType}'.");
+
+        var varcharLength = Math.Min(unicodeLength * 2, FabricVarcharMaxBytes);
+        return $"varchar({varcharLength})";
     }
 
     public static string AdoTypeToSqlServerType(string adoTypeName)

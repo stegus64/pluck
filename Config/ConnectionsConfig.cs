@@ -29,6 +29,10 @@ public sealed class FabricWarehouseConfig
 
 public sealed class OneLakeStagingConfig
 {
+    // Optional full ADLS Gen2 DFS URL, e.g.
+    // https://myaccount.dfs.core.windows.net/myfilesystem/staging/incremental-repl
+    // If set, this is used for staging uploads/COPY paths.
+    public string? DataLakeUrl { get; set; }
     public string WorkspaceId { get; set; } = "";
     public string LakehouseId { get; set; } = "";
     public string FilesPath { get; set; } = "staging/incremental-repl";

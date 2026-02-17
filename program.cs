@@ -29,7 +29,10 @@ public static class Program
             var tokenProvider = new TokenProvider(envConfig.Auth);
 
             // Configure logging
-            var logLevelArg = GetArg(args, "--log-level") ?? "INFO";
+            var debugFlag = args.Any(a => a.Equals("--debug", StringComparison.OrdinalIgnoreCase));
+            var logLevelArg = debugFlag
+                ? "DEBUG"
+                : (GetArg(args, "--log-level") ?? "INFO");
             var minLogLevel = logLevelArg.ToUpperInvariant() switch
             {
                 "ERROR" => Microsoft.Extensions.Logging.LogLevel.Error,
@@ -86,15 +89,15 @@ public static class Program
                     return 3;
                 }
 
-                // 3) Test OneLake access
+                // 3) Test staging lake access
                 try
                 {
                     await uploader.TestConnectionAsync();
-                    logger.LogInformation("OneLake staging: OK");
+                    logger.LogInformation("Staging lake: OK");
                 }
                 catch (Exception ex)
                 {
-                    logger.LogError(ex, "OneLake staging: FAILED");
+                    logger.LogError(ex, "Staging lake: FAILED");
                     return 4;
                 }
 
@@ -168,7 +171,7 @@ public static class Program
 
                     await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, chunkRows);
 
-                    // Upload to OneLake Files/...
+                    // Upload to staging lake path...
                     var oneLakePath = await uploader.UploadAsync(localPath, fileName);
 
                     // Temp table name
