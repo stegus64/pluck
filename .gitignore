@@ -39,6 +39,7 @@ bld/
 .env
 .env.local
 .env.*.local
+connections.yaml
 
 # Temp files
 *.tmp
