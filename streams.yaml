@@ -1,0 +1,17 @@
+streams:
+  - name: "Customers"
+    sourceSql: "SELECT c.CustomerId, c.Name, c.ModifiedAt FROM dbo.Customers c WHERE c.Part = 123"
+    targetTable: "Customers"
+    targetSchema: "dbo"                 # overrides env default if set
+    primaryKey: ["CustomerId"]
+    updateKey: "ModifiedAt"
+    chunkSize: 50000
+
+  - name: "OrdersJoin"
+    sourceSql: "SELECT o.OrderId, o.LineId, o.ModifiedAt, c.Name as CustomerName
+                FROM dbo.Orders o
+                JOIN dbo.Customers c ON c.CustomerId = o.CustomerId"
+    targetTable: "OrdersJoin"
+    primaryKey: ["OrderId","LineId"]
+    updateKey: "ModifiedAt"
+    chunkSize: 20000
