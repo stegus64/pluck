@@ -70,6 +70,7 @@ WHERE s.name = @schema AND t.name = @table;
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         _log.LogDebug("SQL GetTargetColumns: {Sql}", sql);
+        _log.LogDebug("SQL GetTargetColumns Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
         await using var rdr = await cmd.ExecuteReaderAsync();
         sw.Stop();
         _log.LogDebug("GetTargetColumns elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
@@ -86,6 +87,7 @@ WHERE s.name = @schema AND t.name = @table;
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         _log.LogDebug("SQL Exec: {Sql}", sql);
+        _log.LogDebug("SQL Exec Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
         await cmd.ExecuteNonQueryAsync();
         sw.Stop();
         _log.LogDebug("Exec elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);

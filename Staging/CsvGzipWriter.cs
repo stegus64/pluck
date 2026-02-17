@@ -6,9 +6,16 @@ using FabricIncrementalReplicator.Source;
 
 namespace FabricIncrementalReplicator.Staging;
 
+public sealed record ChunkWriteResult(int RowCount, object? MaxUpdateKey);
+
 public sealed class CsvGzipWriter
 {
-    public async Task WriteCsvGzAsync(string path, List<SourceColumn> columns, List<Dictionary<string, object?>> rows)
+    public async Task<ChunkWriteResult> WriteCsvGzAsync(
+        string path,
+        List<SourceColumn> columns,
+        IAsyncEnumerable<object?[]> rows,
+        int updateKeyIndex,
+        CancellationToken ct = default)
     {
         await using var fs = File.Create(path);
         await using var gz = new GZipStream(fs, CompressionLevel.Optimal, leaveOpen: false);
@@ -28,15 +35,21 @@ public sealed class CsvGzipWriter
         await csv.NextRecordAsync();
 
         // Rows
-        foreach (var r in rows)
+        var rowCount = 0;
+        object? maxUpdateKey = null;
+
+        await foreach (var r in rows.WithCancellation(ct))
         {
-            foreach (var c in columns)
-            {
-                r.TryGetValue(c.Name, out var val);
-                csv.WriteField(val);
-            }
+            for (int i = 0; i < columns.Count; i++)
+                csv.WriteField(r[i]);
+
             await csv.NextRecordAsync();
+            rowCount++;
+
+            if (updateKeyIndex >= 0 && updateKeyIndex < r.Length && r[updateKeyIndex] is not null)
+                maxUpdateKey = r[updateKeyIndex];
         }
         await sw.FlushAsync();
+        return new ChunkWriteResult(rowCount, maxUpdateKey);
     }
 }

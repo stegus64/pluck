@@ -140,7 +140,18 @@ public static class Program
 
                 while (true)
                 {
-                    var chunkRows = await sourceChunkReader.ReadNextChunkAsync(
+                    // Local temp file
+                    var runId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
+                    var fileName = $"{stream.Name}/run={runId}/chunk={(chunkIndex + 1):D6}.csv.gz";
+
+                    var localPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), "chunk.csv.gz");
+                    Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
+                    logger.LogDebug("Next chunk local csv.gz path: {LocalPath}", localPath);
+
+                    var updateKeyIndex = sourceColumns.FindIndex(c => c.Name.Equals(stream.UpdateKey, StringComparison.OrdinalIgnoreCase));
+                    if (updateKeyIndex < 0)
+                        throw new Exception($"Update key '{stream.UpdateKey}' was not found in source column list for stream '{stream.Name}'.");
+                    var rowStream = sourceChunkReader.ReadNextChunkStreamAsync(
                         stream.SourceSql,
                         sourceColumns,
                         stream.UpdateKey,
@@ -148,28 +159,19 @@ public static class Program
                         watermark,
                         stream.ChunkSize
                     );
+                    var chunkWrite = await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream, updateKeyIndex);
 
-                    if (chunkRows.Count == 0)
+                    if (chunkWrite.RowCount == 0)
                     {
                         logger.LogInformation("No more rows.");
+                        if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(localPath))
+                            File.Delete(localPath);
                         break;
                     }
 
                     chunkIndex++;
-                    logger.LogInformation("Chunk {ChunkIndex}: rows={RowCount}", chunkIndex, chunkRows.Count);
-
-                    // Determine new watermark = max(updateKey) in this chunk
-                    watermark = SourceChunkReader.GetMaxValue(chunkRows, stream.UpdateKey);
-
-                    // Local temp file
-                    var runId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
-                    var fileName = $"{stream.Name}/run={runId}/chunk={chunkIndex:D6}.csv.gz";
-
-                    var localPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), "chunk.csv.gz");
-                    Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
-                    logger.LogDebug("Chunk {ChunkIndex} local csv.gz path: {LocalPath}", chunkIndex, localPath);
-
-                    await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, chunkRows);
+                    logger.LogInformation("Chunk {ChunkIndex}: rows={RowCount}", chunkIndex, chunkWrite.RowCount);
+                    watermark = chunkWrite.MaxUpdateKey;
 
                     // Upload to staging lake path...
                     var oneLakePath = await uploader.UploadAsync(localPath, fileName);
@@ -184,7 +186,7 @@ public static class Program
                         tempTable: tempTable,
                         columns: sourceColumns,
                         primaryKey: stream.PrimaryKey,
-                        expectedRowCount: chunkRows.Count,
+                        expectedRowCount: chunkWrite.RowCount,
                         oneLakeDfsUrl: oneLakePath,
                         cleanup: envConfig.Cleanup
                     );

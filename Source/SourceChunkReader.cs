@@ -1,5 +1,7 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
+using System.Runtime.CompilerServices;
+using FabricIncrementalReplicator.Util;
 
 namespace FabricIncrementalReplicator.Source;
 
@@ -30,6 +32,7 @@ WHERE (@watermark IS NULL OR [{updateKey}] > @watermark);
         cmd.Parameters.AddWithValue("@watermark", watermark ?? DBNull.Value);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         _log.LogDebug("SQL GetMinMax: {Sql}", sql);
+        _log.LogDebug("SQL GetMinMax Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
         await using var rdr = await cmd.ExecuteReaderAsync();
         sw.Stop();
         _log.LogDebug("GetMinMax execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
@@ -39,13 +42,14 @@ WHERE (@watermark IS NULL OR [{updateKey}] > @watermark);
                 rdr.IsDBNull(1) ? null : rdr.GetValue(1));
     }
 
-    public async Task<List<Dictionary<string, object?>>> ReadNextChunkAsync(
+    public async IAsyncEnumerable<object?[]> ReadNextChunkStreamAsync(
         string sourceSql,
         List<SourceColumn> columns,
         string updateKey,
         List<string> primaryKey,
         object? watermark,
-        int chunkSize)
+        int chunkSize,
+        [EnumeratorCancellation] CancellationToken ct = default)
     {
         var orderCols = new[] { updateKey }
             .Concat(primaryKey)
@@ -64,42 +68,26 @@ ORDER BY {orderBy};
 ";
 
         await using var conn = new SqlConnection(_connString);
-        await conn.OpenAsync();
+        await conn.OpenAsync(ct);
 
         await using var cmd = new SqlCommand(sql, conn);
         cmd.Parameters.AddWithValue("@chunkSize", chunkSize);
         cmd.Parameters.AddWithValue("@watermark", watermark ?? DBNull.Value);
 
-        var rows = new List<Dictionary<string, object?>>();
         var sw = System.Diagnostics.Stopwatch.StartNew();
         _log.LogDebug("SQL ReadNextChunk: {Sql}", sql);
-        await using var rdr = await cmd.ExecuteReaderAsync();
+        _log.LogDebug("SQL ReadNextChunk Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
+        await using var rdr = await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess, ct);
         sw.Stop();
         _log.LogDebug("ReadNextChunk execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
 
-        while (await rdr.ReadAsync())
+        while (await rdr.ReadAsync(ct))
         {
-            var row = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            for (int i = 0; i < rdr.FieldCount; i++)
-            {
-                var name = rdr.GetName(i);
-                row[name] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
-            }
-            rows.Add(row);
-        }
+            var values = new object?[columns.Count];
+            for (int i = 0; i < columns.Count; i++)
+                values[i] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
 
-        return rows;
-    }
-
-    public static object? GetMaxValue(List<Dictionary<string, object?>> rows, string column)
-    {
-        object? max = null;
-        foreach (var r in rows)
-        {
-            if (!r.TryGetValue(column, out var v) || v is null) continue;
-            if (max is null || Comparer<object>.Default.Compare(v, max) > 0)
-                max = v;
+            yield return values;
         }
-        return max;
     }
 }

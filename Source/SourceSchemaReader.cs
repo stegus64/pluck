@@ -52,6 +52,7 @@ EXEC sp_describe_first_result_set @tsql = @q, @params = NULL, @browse_informatio
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         _log.LogDebug("SQL Describe (sp_describe_first_result_set): {Sql}", sql);
+        _log.LogDebug("SQL Describe Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
         var result = new List<SourceColumn>();
         await using var rdr = await cmd.ExecuteReaderAsync();
         sw.Stop();
