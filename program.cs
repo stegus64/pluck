@@ -55,6 +55,7 @@ public static class Program
 
             var uploader = new OneLakeUploader(envConfig.OneLakeStaging, tokenProvider, loggerFactory.CreateLogger<OneLakeUploader>());
             var csvWriter = new CsvGzipWriter();
+            var parquetWriter = new ParquetChunkWriter();
 
             var warehouseConnFactory = new WarehouseConnectionFactory(envConfig.FabricWarehouse, tokenProvider, loggerFactory.CreateLogger<WarehouseConnectionFactory>());
             var schemaManager = new WarehouseSchemaManager(warehouseConnFactory, loggerFactory.CreateLogger<WarehouseSchemaManager>());
@@ -108,6 +109,8 @@ public static class Program
             foreach (var stream in streams.Streams)
             {
                 logger.LogInformation("=== Stream: {StreamName} ===", stream.Name);
+                var stagingFileFormat = NormalizeStagingFileFormat(stream.StagingFileFormat);
+                logger.LogInformation("Stream staging file format: {StagingFileFormat}", stagingFileFormat);
 
                 var targetSchema = stream.TargetSchema ?? envConfig.FabricWarehouse.TargetSchema ?? "dbo";
                 var targetTable = stream.TargetTable;
@@ -142,11 +145,12 @@ public static class Program
                 {
                     // Local temp file
                     var runId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
-                    var fileName = $"{stream.Name}/run={runId}/chunk={(chunkIndex + 1):D6}.csv.gz";
+                    var ext = stagingFileFormat == "parquet" ? "parquet" : "csv.gz";
+                    var fileName = $"{stream.Name}/run={runId}/chunk={(chunkIndex + 1):D6}.{ext}";
 
-                    var localPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), "chunk.csv.gz");
+                    var localPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"chunk.{ext}");
                     Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
-                    logger.LogDebug("Next chunk local csv.gz path: {LocalPath}", localPath);
+                    logger.LogDebug("Next chunk local staging path: {LocalPath}", localPath);
 
                     var updateKeyIndex = sourceColumns.FindIndex(c => c.Name.Equals(stream.UpdateKey, StringComparison.OrdinalIgnoreCase));
                     if (updateKeyIndex < 0)
@@ -160,7 +164,9 @@ public static class Program
                         stream.ChunkSize
                     );
                     var writeSw = System.Diagnostics.Stopwatch.StartNew();
-                    var chunkWrite = await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream, updateKeyIndex);
+                    var chunkWrite = stagingFileFormat == "parquet"
+                        ? await parquetWriter.WriteParquetAsync(localPath, sourceColumns, rowStream, updateKeyIndex)
+                        : await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream, updateKeyIndex);
                     writeSw.Stop();
 
                     if (chunkWrite.RowCount == 0)
@@ -191,6 +197,7 @@ public static class Program
                         primaryKey: stream.PrimaryKey,
                         expectedRowCount: chunkWrite.RowCount,
                         oneLakeDfsUrl: oneLakePath,
+                        stagingFileFormat: stagingFileFormat,
                         cleanup: envConfig.Cleanup
                     );
 
@@ -249,5 +256,19 @@ public static class Program
                 return args[i + 1];
         }
         return null;
+    }
+
+    private static string NormalizeStagingFileFormat(string? value)
+    {
+        var normalized = (value ?? "csv.gz").Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "csv" => "csv.gz",
+            "csv.gz" => "csv.gz",
+            "gz" => "csv.gz",
+            "parquet" => "parquet",
+            "pq" => "parquet",
+            _ => throw new Exception($"Unsupported staging file format '{value}'. Supported values: csv.gz, parquet.")
+        };
     }
 }

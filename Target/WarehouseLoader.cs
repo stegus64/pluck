@@ -39,6 +39,7 @@ public sealed class WarehouseLoader
         List<string> primaryKey,
         int expectedRowCount,
         string oneLakeDfsUrl,
+        string stagingFileFormat,
         CleanupConfig cleanup)
     {
         await using var conn = await _factory.OpenAsync();
@@ -56,17 +57,7 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
 
         // 2) COPY INTO from OneLake (CSV + gzip supported; OneLake supported as source in Fabric) :contentReference[oaicite:8]{index=8}
         var colList = string.Join(",", columns.Select(c => $"[{c.Name}]"));
-        var copySql = $@"
-COPY INTO [{targetSchema}].[{tempTable}] ({colList})
-FROM '{oneLakeDfsUrl}'
-WITH (
-    FILE_TYPE = 'CSV',
-    COMPRESSION = 'GZIP',
-    FIRSTROW = 2,
-    FIELDTERMINATOR = ',',
-    ROWTERMINATOR = '0x0A'
-);
-";
+        var copySql = BuildCopyIntoSql(targetSchema, tempTable, colList, oneLakeDfsUrl, stagingFileFormat);
         _log.LogDebug("COPY INTO SQL: {Sql}", copySql);
         var copyIntoElapsed = await ExecAsync(conn, copySql);
 
@@ -98,6 +89,29 @@ WITH (
         }
 
         return new WarehouseChunkMetrics(copyIntoElapsed, mergeElapsed);
+    }
+
+    private static string BuildCopyIntoSql(
+        string targetSchema,
+        string tempTable,
+        string colList,
+        string sourceUrl,
+        string stagingFileFormat)
+    {
+        var f = (stagingFileFormat ?? "csv.gz").Trim().ToLowerInvariant();
+        var isParquet = f is "parquet" or "pq";
+
+        var withClause = isParquet
+            ? "FILE_TYPE = 'PARQUET'"
+            : "FILE_TYPE = 'CSV',\n    COMPRESSION = 'GZIP',\n    FIRSTROW = 2,\n    FIELDTERMINATOR = ',',\n    ROWTERMINATOR = '0x0A'";
+
+        return $@"
+COPY INTO [{targetSchema}].[{tempTable}] ({colList})
+FROM '{sourceUrl}'
+WITH (
+    {withClause}
+);
+";
     }
 
     private async Task<TimeSpan> ExecAsync(SqlConnection conn, string sql)
