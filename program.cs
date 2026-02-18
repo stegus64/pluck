@@ -161,11 +161,14 @@ public static class Program
 
                 // 3) Read watermark from target
                 object? targetMax = await loaderTarget.GetMaxUpdateKeyAsync(targetSchema, targetTable, stream.UpdateKey);
-                logger.LogInformation("Target watermark (max {UpdateKey}) = {TargetMax}", stream.UpdateKey, targetMax ?? "NULL");
+                logger.LogInformation("Target watermark (max {UpdateKey}) = {TargetMax}", stream.UpdateKey, FormatLogValue(targetMax));
 
                 // 4) Optional logging: source min/max after watermark
                 var (srcMin, srcMax) = await sourceChunkReader.GetMinMaxUpdateKeyAsync(stream.SourceSql, stream.UpdateKey, targetMax);
-                logger.LogInformation("Source range after watermark: min={SourceMin}, max={SourceMax}", srcMin ?? "NULL", srcMax ?? "NULL");
+                logger.LogInformation(
+                    "Source range after watermark: min={SourceMin}, max={SourceMax}",
+                    FormatLogValue(srcMin),
+                    FormatLogValue(srcMax));
 
                 // 5) Chunk loop by update-key interval
                 var chunkIndex = 0;
@@ -447,6 +450,19 @@ public static class Program
     private static bool IsNumericType(object value)
     {
         return value is byte or sbyte or short or ushort or int or uint or long or ulong or float or double or decimal;
+    }
+
+    private static object FormatLogValue(object? value)
+    {
+        if (value is null)
+            return "NULL";
+
+        return value switch
+        {
+            DateTime dt => dt.ToString("yyyy-MM-dd HH:mm:ss.fff"),
+            DateTimeOffset dto => dto.ToString("yyyy-MM-dd HH:mm:ss.fff zzz"),
+            _ => value
+        };
     }
 
     private static DateTime AddDateTimeInterval(DateTime value, ChunkInterval interval)
