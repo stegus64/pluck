@@ -7,12 +7,15 @@ defaults:
     # stagingFileFormat: "parquet"
     # stagingFileFormat: "csv"
     targetTable: "{stream_table}"
-    sourceSql: "SELECT * FROM dbo.{stream_table} WHERE DW_Rowid <= 995000"
+    sourceSql: "SELECT * FROM dbo.{stream_table} WHERE DW_Rowid <= 44000"
 
 streams:
   M3_MITMAS:
-    excludeColumns: ["DW_Version"]
+    #ExcludeColumns: ["DW_Version"]
+    delete_detection:
+      type: subset
+      where: DW_InsertDateTime > dateadd(year, -1, getdate())
   M3_CFACIL:
-    updateKey: DW_InsertDatetime
+    updateKey: DW_InsertDateTime
     chunkSize: 1y
   

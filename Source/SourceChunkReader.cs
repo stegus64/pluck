@@ -9,12 +9,12 @@ public sealed class SourceChunkReader
 {
     private readonly string _connString;
     private readonly int _commandTimeoutSeconds;
-    private readonly Microsoft.Extensions.Logging.ILogger<SourceChunkReader> _log;
-    public SourceChunkReader(string connString, int commandTimeoutSeconds = 3600, Microsoft.Extensions.Logging.ILogger<SourceChunkReader>? log = null)
+    private readonly Microsoft.Extensions.Logging.ILogger _log;
+    public SourceChunkReader(string connString, int commandTimeoutSeconds = 3600, Microsoft.Extensions.Logging.ILogger? log = null)
     {
         _connString = connString;
         _commandTimeoutSeconds = commandTimeoutSeconds > 0 ? commandTimeoutSeconds : 3600;
-        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<SourceChunkReader>.Instance;
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
     public async Task<(object? Min, object? Max)> GetMinMaxUpdateKeyAsync(string sourceSql, string updateKey, object? watermark)

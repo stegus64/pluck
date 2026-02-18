@@ -15,6 +15,26 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        // Configure logging
+        var debugFlag = args.Any(a => a.Equals("--debug", StringComparison.OrdinalIgnoreCase));
+        var logLevelArg = debugFlag
+            ? "DEBUG"
+            : (GetArg(args, "--log-level") ?? "INFO");
+        var minLogLevel = logLevelArg.ToUpperInvariant() switch
+        {
+            "ERROR" => Microsoft.Extensions.Logging.LogLevel.Error,
+            "DEBUG" => Microsoft.Extensions.Logging.LogLevel.Debug,
+            _ => Microsoft.Extensions.Logging.LogLevel.Information,
+        };
+
+        using var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(builder =>
+        {
+            builder.AddSimpleConsole(options => { options.TimestampFormat = "HH:mm:ss "; options.SingleLine = true; });
+            builder.SetMinimumLevel(minLogLevel);
+        });
+
+        var logger = loggerFactory.CreateLogger("App");
+
         try
         {
             var env = GetArg(args, "--env") ?? "dev";
@@ -30,25 +50,6 @@ public static class Program
 
             var tokenProvider = new TokenProvider(envConfig.Auth);
 
-            // Configure logging
-            var debugFlag = args.Any(a => a.Equals("--debug", StringComparison.OrdinalIgnoreCase));
-            var logLevelArg = debugFlag
-                ? "DEBUG"
-                : (GetArg(args, "--log-level") ?? "INFO");
-            var minLogLevel = logLevelArg.ToUpperInvariant() switch
-            {
-                "ERROR" => Microsoft.Extensions.Logging.LogLevel.Error,
-                "DEBUG" => Microsoft.Extensions.Logging.LogLevel.Debug,
-                _ => Microsoft.Extensions.Logging.LogLevel.Information,
-            };
-
-            using var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(builder =>
-            {
-                builder.AddSimpleConsole(options => { options.TimestampFormat = "HH:mm:ss "; options.SingleLine = true; });
-                builder.SetMinimumLevel(minLogLevel);
-            });
-
-            var logger = loggerFactory.CreateLogger("Program");
 
             var testConnectionsFlag = args.Any(a => a.Equals("--test-connections", StringComparison.OrdinalIgnoreCase));
 
@@ -56,19 +57,19 @@ public static class Program
                 envConfig.SourceSql.ConnectionString,
                 envConfig.SchemaDiscovery,
                 envConfig.SourceSql.CommandTimeoutSeconds,
-                loggerFactory.CreateLogger<SourceSchemaReader>());
+                logger);
             var sourceChunkReader = new SourceChunkReader(
                 envConfig.SourceSql.ConnectionString,
                 envConfig.SourceSql.CommandTimeoutSeconds,
-                loggerFactory.CreateLogger<SourceChunkReader>());
+                logger);
 
-            var uploader = new OneLakeUploader(envConfig.OneLakeStaging, tokenProvider, loggerFactory.CreateLogger<OneLakeUploader>());
+            var uploader = new OneLakeUploader(envConfig.OneLakeStaging, tokenProvider, logger);
             var csvWriter = new CsvGzipWriter();
             var parquetWriter = new ParquetChunkWriter();
 
-            var warehouseConnFactory = new WarehouseConnectionFactory(envConfig.FabricWarehouse, tokenProvider, loggerFactory.CreateLogger<WarehouseConnectionFactory>());
-            var schemaManager = new WarehouseSchemaManager(warehouseConnFactory, loggerFactory.CreateLogger<WarehouseSchemaManager>());
-            var loaderTarget = new WarehouseLoader(warehouseConnFactory, loggerFactory.CreateLogger<WarehouseLoader>());
+            var warehouseConnFactory = new WarehouseConnectionFactory(envConfig.FabricWarehouse, tokenProvider, logger);
+            var schemaManager = new WarehouseSchemaManager(warehouseConnFactory, logger);
+            var loaderTarget = new WarehouseLoader(warehouseConnFactory, logger);
 
             if (testConnectionsFlag)
             {
@@ -370,15 +371,16 @@ public static class Program
 
             return 0;
         }
+        catch (SqlException ex)
+        {
+            // SQL errors: concise output without stack trace.
+            logger.LogError("{ExceptionType}: {Message}", ex.GetType().Name, ex.Message);
+            return 1;
+        }
         catch (Exception ex)
         {
-            using var loggerFactory = Microsoft.Extensions.Logging.LoggerFactory.Create(builder =>
-            {
-                builder.AddSimpleConsole(options => { options.TimestampFormat = "HH:mm:ss "; options.SingleLine = false; });
-                builder.SetMinimumLevel(Microsoft.Extensions.Logging.LogLevel.Critical);
-            });
-            var logger = loggerFactory.CreateLogger("Program");
-            logger.LogCritical(ex, "Unhandled exception during replication run.");
+            // Non-SQL errors: full stack trace.
+            logger.LogError(ex, "Unhandled exception during replication run.");
             return 1;
         }
     }

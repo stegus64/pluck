@@ -12,13 +12,13 @@ public sealed class SourceSchemaReader
     private readonly string _connString;
     private readonly SchemaDiscoveryConfig _cfg;
     private readonly int _commandTimeoutSeconds;
-    private readonly ILogger<SourceSchemaReader> _log;
-    public SourceSchemaReader(string connString, SchemaDiscoveryConfig cfg, int commandTimeoutSeconds = 3600, ILogger<SourceSchemaReader>? log = null)
+    private readonly ILogger _log;
+    public SourceSchemaReader(string connString, SchemaDiscoveryConfig cfg, int commandTimeoutSeconds = 3600, ILogger? log = null)
     {
         _connString = connString;
         _cfg = cfg;
         _commandTimeoutSeconds = commandTimeoutSeconds > 0 ? commandTimeoutSeconds : 3600;
-        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<SourceSchemaReader>.Instance;
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
     public async Task<List<SourceColumn>> DescribeQueryAsync(string sourceSql)

@@ -12,11 +12,11 @@ public sealed record WarehouseDeleteMetrics(TimeSpan CopyIntoElapsed, TimeSpan S
 public sealed class WarehouseLoader
 {
     private readonly WarehouseConnectionFactory _factory;
-    private readonly Microsoft.Extensions.Logging.ILogger<WarehouseLoader> _log;
-    public WarehouseLoader(WarehouseConnectionFactory factory, Microsoft.Extensions.Logging.ILogger<WarehouseLoader>? log = null)
+    private readonly Microsoft.Extensions.Logging.ILogger _log;
+    public WarehouseLoader(WarehouseConnectionFactory factory, Microsoft.Extensions.Logging.ILogger? log = null)
     {
         _factory = factory;
-        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<WarehouseLoader>.Instance;
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
     public async Task<object?> GetMaxUpdateKeyAsync(string schema, string table, string updateKey)
@@ -60,7 +60,6 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
         // 2) COPY INTO from OneLake (CSV + gzip supported; OneLake supported as source in Fabric) :contentReference[oaicite:8]{index=8}
         var colList = string.Join(",", columns.Select(c => $"[{c.Name}]"));
         var copySql = BuildCopyIntoSql(targetSchema, tempTable, colList, oneLakeDfsUrl, stagingFileFormat);
-        _log.LogDebug("COPY INTO SQL: {Sql}", copySql);
         var copyIntoElapsed = await ExecAsync(conn, copySql, "copy into temp table");
 
         // 3) Verify rows loaded into temp table match source chunk rows
@@ -80,7 +79,6 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
 
         // 4) MERGE into target (MERGE supported in Fabric Warehouse per official surface area) :contentReference[oaicite:9]{index=9}
         var mergeSql = MergeBuilder.BuildMergeSql(targetSchema, targetTable, tempTable, columns, primaryKey);
-        _log.LogDebug("MERGE SQL: {Sql}", mergeSql);
         var mergeElapsed = await ExecAsync(conn, mergeSql, "merge into target");
 
         // 5) Cleanup temp table
@@ -174,6 +172,7 @@ WITH (
     {
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
+        _log.LogDebug("SQL Exec ({Operation}): {Sql}", operation, sql);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
@@ -203,6 +202,7 @@ WITH (
     {
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
+        _log.LogDebug("SQL ExecWithRows ({Operation}): {Sql}", operation, sql);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {

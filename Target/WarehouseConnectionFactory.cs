@@ -9,13 +9,13 @@ public sealed class WarehouseConnectionFactory
 {
     private readonly FabricWarehouseConfig _cfg;
     private readonly TokenProvider _tokenProvider;
-    private readonly Microsoft.Extensions.Logging.ILogger<WarehouseConnectionFactory> _log;
+    private readonly Microsoft.Extensions.Logging.ILogger _log;
 
-    public WarehouseConnectionFactory(FabricWarehouseConfig cfg, TokenProvider tokenProvider, Microsoft.Extensions.Logging.ILogger<WarehouseConnectionFactory>? log = null)
+    public WarehouseConnectionFactory(FabricWarehouseConfig cfg, TokenProvider tokenProvider, Microsoft.Extensions.Logging.ILogger? log = null)
     {
         _cfg = cfg;
         _tokenProvider = tokenProvider;
-        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<WarehouseConnectionFactory>.Instance;
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
     public int CommandTimeoutSeconds => _cfg.CommandTimeoutSeconds > 0 ? _cfg.CommandTimeoutSeconds : 3600;

@@ -9,16 +9,16 @@ public sealed class OneLakeUploader
 {
     private readonly OneLakeStagingConfig _cfg;
     private readonly DataLakeServiceClient _svc;
-    private readonly Microsoft.Extensions.Logging.ILogger<OneLakeUploader> _log;
+    private readonly Microsoft.Extensions.Logging.ILogger _log;
     private readonly string _fileSystemName;
     private readonly string _baseDirectoryPath;
     private readonly string _stagingBaseUrl;
     private readonly string _stagingQuery;
 
-    public OneLakeUploader(OneLakeStagingConfig cfg, TokenProvider tokenProvider, Microsoft.Extensions.Logging.ILogger<OneLakeUploader>? log = null)
+    public OneLakeUploader(OneLakeStagingConfig cfg, TokenProvider tokenProvider, Microsoft.Extensions.Logging.ILogger? log = null)
     {
         _cfg = cfg;
-        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<OneLakeUploader>.Instance;
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
 
         var resolved = ResolveStagingTarget(_cfg);
         _svc = new DataLakeServiceClient(resolved.ServiceUrl, tokenProvider.Credential);

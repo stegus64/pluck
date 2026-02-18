@@ -8,11 +8,11 @@ namespace FabricIncrementalReplicator.Target;
 public sealed class WarehouseSchemaManager
 {
     private readonly WarehouseConnectionFactory _factory;
-    private readonly Microsoft.Extensions.Logging.ILogger<WarehouseSchemaManager> _log;
-    public WarehouseSchemaManager(WarehouseConnectionFactory factory, Microsoft.Extensions.Logging.ILogger<WarehouseSchemaManager>? log = null)
+    private readonly Microsoft.Extensions.Logging.ILogger _log;
+    public WarehouseSchemaManager(WarehouseConnectionFactory factory, Microsoft.Extensions.Logging.ILogger? log = null)
     {
         _factory = factory;
-        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger<WarehouseSchemaManager>.Instance;
+        _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
     public async Task EnsureTableAndSchemaAsync(string schema, string table, List<SourceColumn> sourceColumns, List<string> primaryKey)
