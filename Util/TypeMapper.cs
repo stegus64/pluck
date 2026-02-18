@@ -25,7 +25,11 @@ public static class TypeMapper
             return t;
         if (t.StartsWith("decimal") || t.StartsWith("numeric"))
             return t;
-        if (t.StartsWith("datetime2") || t.StartsWith("datetime") || t.StartsWith("date") || t.StartsWith("time"))
+        if (t.StartsWith("datetime2"))
+            return NormalizeTemporalPrecision(t, "datetime2");
+        if (t.StartsWith("time"))
+            return NormalizeTemporalPrecision(t, "time");
+        if (t.StartsWith("datetime") || t.StartsWith("date"))
             return t;
         if (t is "int" or "bigint" or "smallint" or "tinyint" or "bit" or "float" or "real" or "uniqueidentifier")
             return t;
@@ -52,6 +56,21 @@ public static class TypeMapper
         return $"varchar({varcharLength})";
     }
 
+    private static string NormalizeTemporalPrecision(string normalizedType, string typeName)
+    {
+        var openParen = normalizedType.IndexOf('(');
+        var closeParen = normalizedType.IndexOf(')', openParen + 1);
+        if (openParen < 0 || closeParen <= openParen)
+            return $"{typeName}(6)";
+
+        var sizeToken = normalizedType.Substring(openParen + 1, closeParen - openParen - 1).Trim();
+        if (!int.TryParse(sizeToken, out var precision))
+            return $"{typeName}(6)";
+
+        precision = Math.Clamp(precision, 0, 6);
+        return $"{typeName}({precision})";
+    }
+
     public static string AdoTypeToSqlServerType(string adoTypeName)
     {
         return adoTypeName.ToLowerInvariant() switch
@@ -59,7 +78,7 @@ public static class TypeMapper
             "string" => "nvarchar(max)",
             "int32" => "int",
             "int64" => "bigint",
-            "datetime" => "datetime2(7)",
+            "datetime" => "datetime2(6)",
             "decimal" => "decimal(38, 10)",
             "boolean" => "bit",
             "double" => "float",

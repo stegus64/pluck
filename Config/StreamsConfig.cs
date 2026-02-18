@@ -1,3 +1,5 @@
+using YamlDotNet.Serialization;
+
 namespace FabricIncrementalReplicator.Config;
 
 public sealed class StreamsConfig
@@ -32,6 +34,8 @@ public sealed class StreamConfig
     public string? ChunkSize { get; set; }
     // Supported values: "csv.gz" (default), "csv", "parquet"
     public string? StagingFileFormat { get; set; }
+    [YamlMember(Alias = "delete_detection")]
+    public DeleteDetectionConfig? DeleteDetection { get; set; }
 
     public static StreamConfig Merge(StreamConfig defaults, StreamConfig? streamOverride, string streamName)
     {
@@ -44,7 +48,8 @@ public sealed class StreamConfig
             ExcludeColumns = streamOverride?.ExcludeColumns ?? defaults.ExcludeColumns,
             UpdateKey = streamOverride?.UpdateKey ?? defaults.UpdateKey,
             ChunkSize = streamOverride?.ChunkSize ?? defaults.ChunkSize,
-            StagingFileFormat = streamOverride?.StagingFileFormat ?? defaults.StagingFileFormat
+            StagingFileFormat = streamOverride?.StagingFileFormat ?? defaults.StagingFileFormat,
+            DeleteDetection = DeleteDetectionConfig.Merge(defaults.DeleteDetection, streamOverride?.DeleteDetection)
         };
 
         merged.SourceSql = ApplyToken(merged.SourceSql, streamName);
@@ -52,6 +57,8 @@ public sealed class StreamConfig
         merged.TargetSchema = ApplyToken(merged.TargetSchema, streamName);
         merged.UpdateKey = ApplyToken(merged.UpdateKey, streamName);
         merged.StagingFileFormat = ApplyToken(merged.StagingFileFormat, streamName);
+        if (merged.DeleteDetection is not null)
+            merged.DeleteDetection.Where = ApplyToken(merged.DeleteDetection.Where, streamName);
 
         if (merged.PrimaryKey is not null)
             merged.PrimaryKey = merged.PrimaryKey.Select(k => ApplyToken(k, streamName) ?? k).ToList();
@@ -84,7 +91,8 @@ public sealed class StreamConfig
             ExcludeColumns = ExcludeColumns ?? new List<string>(),
             UpdateKey = UpdateKey,
             ChunkSize = chunkSize,
-            StagingFileFormat = string.IsNullOrWhiteSpace(StagingFileFormat) ? "csv.gz" : StagingFileFormat
+            StagingFileFormat = string.IsNullOrWhiteSpace(StagingFileFormat) ? "csv.gz" : StagingFileFormat,
+            DeleteDetection = DeleteDetectionConfig.Resolve(DeleteDetection, streamName)
         };
     }
 
@@ -108,4 +116,39 @@ public sealed class ResolvedStreamConfig
     public string UpdateKey { get; set; } = "";
     public string? ChunkSize { get; set; }
     public string StagingFileFormat { get; set; } = "csv.gz";
+    public DeleteDetectionConfig DeleteDetection { get; set; } = new() { Type = "none" };
+}
+
+public sealed class DeleteDetectionConfig
+{
+    public string? Type { get; set; }
+    public string? Where { get; set; }
+
+    public static DeleteDetectionConfig? Merge(DeleteDetectionConfig? defaults, DeleteDetectionConfig? streamOverride)
+    {
+        if (defaults is null && streamOverride is null)
+            return null;
+
+        return new DeleteDetectionConfig
+        {
+            Type = streamOverride?.Type ?? defaults?.Type,
+            Where = streamOverride?.Where ?? defaults?.Where
+        };
+    }
+
+    public static DeleteDetectionConfig Resolve(DeleteDetectionConfig? cfg, string streamName)
+    {
+        if (cfg is null || string.IsNullOrWhiteSpace(cfg.Type))
+            return new DeleteDetectionConfig { Type = "none" };
+
+        var t = cfg.Type.Trim().ToLowerInvariant();
+        if (t is not ("none" or "subset"))
+            throw new Exception($"Unsupported delete_detection.type '{cfg.Type}' for stream '{streamName}'. Supported values: none, subset.");
+
+        return new DeleteDetectionConfig
+        {
+            Type = t,
+            Where = string.IsNullOrWhiteSpace(cfg.Where) ? null : cfg.Where
+        };
+    }
 }

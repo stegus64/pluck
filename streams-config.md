@@ -140,6 +140,36 @@ Behavior:
 - Excluded columns are not fetched in the chunk row read step.
 - You cannot exclude `updateKey` or any `primaryKey` column.
 
+### `delete_detection` (optional)
+
+Controls hard-delete detection and soft-delete marking in the target table.
+
+```yaml
+delete_detection:
+  type: subset   # subset or none
+  where: "created_date > dateadd(year, -1, getdate())"
+```
+
+Fields:
+
+- `type`:
+  - `none` (default): do not run delete detection.
+  - `subset`: run delete detection after all chunks for the stream.
+- `where` (optional):
+  - SQL predicate applied to both:
+    - source key extraction subset
+    - target rows considered for soft-delete comparison
+  - if omitted, the full source/target set is used.
+
+Behavior:
+
+- Delete detection runs as a separate post-chunk step per stream.
+- Source primary keys are fetched in one pass (not chunked).
+- Any target row in the selected subset with no matching source key is soft-deleted.
+- Soft delete means:
+  - `_sg_update_op = 'D'`
+  - `_sg_update_datetime = SYSUTCDATETIME()`
+
 ## Full Example
 
 ```yaml
@@ -165,7 +195,27 @@ streams:
     updateKey: "DW_Rowid"
     chunkSize: "100000"
     stagingFileFormat: "csv"
+
+  M3_ORDERS:
+    delete_detection:
+      type: "subset"
+      where: "created_date > dateadd(year, -1, getdate())"
 ```
+
+## Target Metadata Columns
+
+The loader always ensures these metadata columns exist in every target table:
+
+- `_sg_update_datetime` (`datetime2(6)`): timestamp of last insert/update/soft-delete.
+- `_sg_update_op` (`char(1)`): last operation:
+  - `'I'` = insert
+  - `'U'` = update
+  - `'D'` = soft delete
+
+Notes:
+
+- These metadata columns are added even if delete detection is disabled.
+- They are maintained by merge and delete-detection steps.
 
 ## Validation Rules
 

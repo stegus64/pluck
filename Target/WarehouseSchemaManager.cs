@@ -52,6 +52,8 @@ END
             var addSql = $@"ALTER TABLE [{schema}].[{table}] ADD [{m.Name}] {TypeMapper.SqlServerToFabricWarehouseType(m.SqlServerTypeName)} NULL;";
             await ExecAsync(conn, addSql);
         }
+
+        await EnsureMetadataColumnsAsync(conn, schema, table);
     }
 
     private async Task<HashSet<string>> GetTargetColumnsAsync(SqlConnection conn, string schema, string table)
@@ -93,5 +95,22 @@ WHERE s.name = @schema AND t.name = @table;
         await cmd.ExecuteNonQueryAsync();
         sw.Stop();
         _log.LogDebug("Exec elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+    }
+
+    private async Task EnsureMetadataColumnsAsync(SqlConnection conn, string schema, string table)
+    {
+        var cols = await GetTargetColumnsAsync(conn, schema, table);
+
+        if (!cols.Contains("_sg_update_datetime"))
+        {
+            var sql = $@"ALTER TABLE [{schema}].[{table}] ADD [_sg_update_datetime] datetime2(6) NULL;";
+            await ExecAsync(conn, sql);
+        }
+
+        if (!cols.Contains("_sg_update_op"))
+        {
+            var sql = $@"ALTER TABLE [{schema}].[{table}] ADD [_sg_update_op] char(1) NULL;";
+            await ExecAsync(conn, sql);
+        }
     }
 }

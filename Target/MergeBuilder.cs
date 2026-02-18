@@ -18,12 +18,14 @@ public static class MergeBuilder
             .Where(c => !primaryKey.Contains(c, StringComparer.OrdinalIgnoreCase))
             .ToList();
 
-        var setClause = nonPkCols.Count == 0
-            ? "/* no non-PK columns */"
-            : string.Join(", ", nonPkCols.Select(c => $"t.[{c}] = s.[{c}]"));
+        var setAssignments = new List<string>();
+        setAssignments.AddRange(nonPkCols.Select(c => $"t.[{c}] = s.[{c}]"));
+        setAssignments.Add("t.[_sg_update_datetime] = SYSUTCDATETIME()");
+        setAssignments.Add("t.[_sg_update_op] = 'U'");
+        var setClause = string.Join(", ", setAssignments);
 
-        var insertCols = string.Join(", ", columns.Select(c => $"[{c.Name}]"));
-        var insertVals = string.Join(", ", columns.Select(c => $"s.[{c.Name}]"));
+        var insertCols = string.Join(", ", columns.Select(c => $"[{c.Name}]").Concat(["[_sg_update_datetime]", "[_sg_update_op]"]));
+        var insertVals = string.Join(", ", columns.Select(c => $"s.[{c.Name}]").Concat(["SYSUTCDATETIME()", "'I'"]));
 
         return $@"
 MERGE [{schema}].[{targetTable}] AS t

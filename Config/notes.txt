@@ -1,0 +1,48 @@
+I want chunksize to represent an updatekey inteval, not a count of rows. 
+
+pseudocode for chunking:
+Get watermark as max(updatekey) from target table;
+get min(updatekey) as minval and max(updatekey) as maxval from the source table where updatekey > watermark or watermark is null;
+lowerbound = minval;
+while lowerbound <= maxval:
+    process chunk where updatekey >= lowerbound and updatekey < lowerbound+chunksize;
+    lowerbound += chunksize;
+endwhile;
+
+edge cases to think about:
+* We have more than chunksize rows with the same updatekey
+    We will get some extra large chunks. As long as they are not too large that is not a problem
+* All rows have the same updatekey
+    There will only be one chunk. As long as the number of rows is not too large, not a problem
+* Data might be written out-of order if the source system for example has multiple threads that are generating Data while the batch is running
+    Add a where condition that exclude updates made in the last 5 minutes
+
+Major new functionality
+
+I want to support hard deletes in the source.
+This means that we need to fetch all primary keys in a certain subset of the source table and compare those keys with keys in our target table.
+Any row in the target table within the subset that does NOT exist in the subset from the source should be marked as soft deleted.
+For reasonably sized tables, the subset I am talking about can be the whole table.
+For very large tables that might contain 10 years of historic orders for example, it is common that deletes are only interesting in orders created 
+up to a year back or something like that.
+If we want subset handling we should add a where condition both when getting the primary keys from the source and when selecting the 
+part of the target table to compare with the source keys.
+To handle this we should add a couple of new metadata columns to the target table:
+    _sg_update_datetime The datetime when this row was last updated (by insert, update, or soft delete)
+    _sg_update_op       The operation that last updated this row 'I' for insert, 'U' for update, 'D' for soft delete
+
+The new metadata columns should always be added even if delete detection is not used
+
+The configuration in streams.yaml should look like this:
+
+    delete_detection:
+        type: subset # subset or none, we might add more types later
+        where: created_date > dateadd(year, -1, getdate())
+
+If the delete_detection part is missing, or type=none, no delete detection should be performed.
+If the "where" part is missing, we should load all keys in the entire source table
+
+The fetching of primary keys from the source is not subject to any chunking. We always fetch all keys in the subset
+The delete detection should run as a separate step for each stream after all chunks have been processed.
+
+Ask for clarification if anything is unclear

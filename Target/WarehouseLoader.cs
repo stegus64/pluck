@@ -7,6 +7,7 @@ using Microsoft.Extensions.Logging;
 namespace FabricIncrementalReplicator.Target;
 
 public sealed record WarehouseChunkMetrics(TimeSpan CopyIntoElapsed, TimeSpan MergeElapsed);
+public sealed record WarehouseDeleteMetrics(TimeSpan CopyIntoElapsed, TimeSpan SoftDeleteElapsed, int AffectedRows);
 
 public sealed class WarehouseLoader
 {
@@ -92,6 +93,57 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
         return new WarehouseChunkMetrics(copyIntoElapsed, mergeElapsed);
     }
 
+    public async Task<WarehouseDeleteMetrics> SoftDeleteMissingRowsAsync(
+        string targetSchema,
+        string targetTable,
+        string sourceKeysTempTable,
+        List<SourceColumn> primaryKeyColumns,
+        string sourceKeysDfsUrl,
+        string sourceKeysFileFormat,
+        string? subsetWhere,
+        CleanupConfig cleanup)
+    {
+        await using var conn = await _factory.OpenAsync();
+
+        var pkDefs = string.Join(",\n", primaryKeyColumns.Select(c =>
+            $"[{c.Name}] {TypeMapper.SqlServerToFabricWarehouseType(c.SqlServerTypeName)} NULL"));
+        var createTempSql = $@"
+CREATE TABLE [{targetSchema}].[{sourceKeysTempTable}] (
+{pkDefs}
+);
+";
+        await ExecAsync(conn, createTempSql, "create source-keys temp table");
+
+        var pkColList = string.Join(",", primaryKeyColumns.Select(c => $"[{c.Name}]"));
+        var copySql = BuildCopyIntoSql(targetSchema, sourceKeysTempTable, pkColList, sourceKeysDfsUrl, sourceKeysFileFormat);
+        var copyElapsed = await ExecAsync(conn, copySql, "copy source keys into temp table");
+
+        var pkJoin = string.Join(" AND ", primaryKeyColumns.Select(c => $"t.[{c.Name}] = s.[{c.Name}]"));
+        var subsetPredicate = string.IsNullOrWhiteSpace(subsetWhere) ? "1=1" : $"({subsetWhere})";
+        var softDeleteSql = $@"
+UPDATE t
+SET t.[_sg_update_datetime] = SYSUTCDATETIME(),
+    t.[_sg_update_op] = 'D'
+FROM [{targetSchema}].[{targetTable}] AS t
+WHERE {subsetPredicate}
+  AND NOT EXISTS (
+      SELECT 1
+      FROM [{targetSchema}].[{sourceKeysTempTable}] AS s
+      WHERE {pkJoin}
+  )
+  AND ISNULL(t.[_sg_update_op], '') <> 'D';
+";
+        var (softDeleteElapsed, affectedRows) = await ExecWithRowsAsync(conn, softDeleteSql, "soft delete missing rows");
+
+        if (cleanup.DropTempTables)
+        {
+            var dropSql = $@"DROP TABLE [{targetSchema}].[{sourceKeysTempTable}];";
+            await ExecAsync(conn, dropSql, "drop source-keys temp table");
+        }
+
+        return new WarehouseDeleteMetrics(copyElapsed, softDeleteElapsed, affectedRows);
+    }
+
     private static string BuildCopyIntoSql(
         string targetSchema,
         string tempTable,
@@ -129,6 +181,35 @@ WITH (
             sw.Stop();
             _log.LogDebug("Exec elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
             return sw.Elapsed;
+        }
+        catch (SqlException ex)
+        {
+            sw.Stop();
+            _log.LogError(
+                ex,
+                "SQL operation failed ({Operation}) after {ElapsedMs:F0}ms. Number={ErrorNumber}, State={State}, Class={Class}, ClientConnectionId={ClientConnectionId}, Sql={Sql}",
+                operation,
+                sw.Elapsed.TotalMilliseconds,
+                ex.Number,
+                ex.State,
+                ex.Class,
+                ex.ClientConnectionId,
+                CompactSql(sql));
+            throw;
+        }
+    }
+
+    private async Task<(TimeSpan Elapsed, int Rows)> ExecWithRowsAsync(SqlConnection conn, string sql, string operation)
+    {
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        try
+        {
+            var rows = await cmd.ExecuteNonQueryAsync();
+            sw.Stop();
+            _log.LogDebug("Exec elapsed: {Elapsed}ms, rows={Rows}", sw.Elapsed.TotalMilliseconds, rows);
+            return (sw.Elapsed, rows);
         }
         catch (SqlException ex)
         {

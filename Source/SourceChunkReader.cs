@@ -134,4 +134,43 @@ WHERE [{updateKey}] >= @lowerBound
             yield return values;
         }
     }
+
+    public async IAsyncEnumerable<object?[]> ReadColumnsAsync(
+        string sourceSql,
+        List<string> columnNames,
+        string? whereClause = null,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var selectList = string.Join(", ", columnNames.Select(c => $"[{c}]"));
+        var whereSql = string.IsNullOrWhiteSpace(whereClause) ? string.Empty : $"\nWHERE ({whereClause})";
+
+        var sql = $@"
+WITH src AS (
+    {sourceSql}
+)
+SELECT {selectList}
+FROM src{whereSql};
+";
+
+        await using var conn = new SqlConnection(_connString);
+        await conn.OpenAsync(ct);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _commandTimeoutSeconds;
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("SQL ReadColumns: {Sql}", sql);
+        await using var rdr = await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess, ct);
+        sw.Stop();
+        _log.LogDebug("ReadColumns execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+
+        while (await rdr.ReadAsync(ct))
+        {
+            var values = new object?[columnNames.Count];
+            for (int i = 0; i < columnNames.Count; i++)
+                values[i] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+
+            yield return values;
+        }
+    }
 }
