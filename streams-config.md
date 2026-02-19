@@ -16,6 +16,7 @@ Example:
 maxParallelStreams: 2
 
 defaults:
+  sourceConnection: "landSql"
   primaryKey: ["DW_Rowid"]
   updateKey: "DW_Rowid"
   chunkSize: "50000"
@@ -74,6 +75,15 @@ Source query to read from SQL Server.
 
 ```yaml
 sourceSql: "SELECT * FROM dbo.M3_MITMAS"
+```
+
+### `sourceConnection` (required)
+
+Named source connection to use for this stream. The name must exist in
+`connections.yaml` under `environments.<env>.sourceConnections`.
+
+```yaml
+sourceConnection: "landSql"
 ```
 
 ### `targetTable` (required)
@@ -194,6 +204,7 @@ Behavior:
 
 ```yaml
 defaults:
+  sourceConnection: "landSql"
   primaryKey: ["DW_Rowid"]
   updateKey: "DW_Rowid"
   chunkSize: "7d"
@@ -226,7 +237,7 @@ streams:
 
 The loader always ensures these metadata columns exist in every target table:
 
-- `_sg_update_datetime` (`datetime2(6)`): timestamp of last insert/update/soft-delete.
+- `_sg_update_datetime` (`datetime2(0)`): timestamp of last insert/update/soft-delete.
 - `_sg_update_op` (`char(1)`): last operation:
   - `'I'` = insert
   - `'U'` = update
@@ -241,6 +252,7 @@ Notes:
 
 A stream must resolve to valid values for:
 
+- `sourceConnection`
 - `sourceSql`
 - `targetTable`
 - `primaryKey`

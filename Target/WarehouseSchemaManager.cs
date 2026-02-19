@@ -105,7 +105,7 @@ WHERE s.name = @schema AND t.name = @table;
 
         if (!cols.Contains("_sg_update_datetime"))
         {
-            var sql = $@"ALTER TABLE [{schema}].[{table}] ADD [_sg_update_datetime] datetime2(6) NULL;";
+            var sql = $@"ALTER TABLE [{schema}].[{table}] ADD [_sg_update_datetime] datetime2(0) NULL;";
             await ExecAsync(conn, sql, logPrefix);
         }
 

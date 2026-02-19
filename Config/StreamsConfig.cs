@@ -34,6 +34,7 @@ public sealed class StreamsConfig
 
 public sealed class StreamConfig
 {
+    public string? SourceConnection { get; set; }
     public string? SourceSql { get; set; }
     public string? TargetTable { get; set; }
     public string? TargetSchema { get; set; }
@@ -53,6 +54,7 @@ public sealed class StreamConfig
         var merged = new StreamConfig
         {
             SourceSql = streamOverride?.SourceSql ?? defaults.SourceSql,
+            SourceConnection = streamOverride?.SourceConnection ?? defaults.SourceConnection,
             TargetTable = streamOverride?.TargetTable ?? defaults.TargetTable,
             TargetSchema = streamOverride?.TargetSchema ?? defaults.TargetSchema,
             PrimaryKey = streamOverride?.PrimaryKey ?? defaults.PrimaryKey,
@@ -64,6 +66,7 @@ public sealed class StreamConfig
         };
 
         merged.SourceSql = ApplyToken(merged.SourceSql, streamName);
+        merged.SourceConnection = ApplyToken(merged.SourceConnection, streamName);
         merged.TargetTable = ApplyToken(merged.TargetTable, streamName);
         merged.TargetSchema = ApplyToken(merged.TargetSchema, streamName);
         merged.UpdateKey = ApplyToken(merged.UpdateKey, streamName);
@@ -83,6 +86,8 @@ public sealed class StreamConfig
     {
         if (string.IsNullOrWhiteSpace(SourceSql))
             throw new Exception($"Missing required stream setting 'sourceSql' for stream '{streamName}'.");
+        if (string.IsNullOrWhiteSpace(SourceConnection))
+            throw new Exception($"Missing required stream setting 'sourceConnection' for stream '{streamName}'.");
         if (string.IsNullOrWhiteSpace(TargetTable))
             throw new Exception($"Missing required stream setting 'targetTable' for stream '{streamName}'.");
         if (string.IsNullOrWhiteSpace(UpdateKey))
@@ -95,6 +100,7 @@ public sealed class StreamConfig
         return new ResolvedStreamConfig
         {
             Name = streamName,
+            SourceConnection = SourceConnection,
             SourceSql = SourceSql,
             TargetTable = TargetTable,
             TargetSchema = string.IsNullOrWhiteSpace(TargetSchema) ? null : TargetSchema,
@@ -119,6 +125,7 @@ public sealed class StreamConfig
 public sealed class ResolvedStreamConfig
 {
     public string Name { get; set; } = "";
+    public string SourceConnection { get; set; } = "";
     public string SourceSql { get; set; } = "";
     public string TargetTable { get; set; } = "";
     public string? TargetSchema { get; set; }

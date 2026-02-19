@@ -67,22 +67,14 @@ public static class Program
 
             if (!connectionsRoot.Environments.TryGetValue(env, out var envConfig))
                 throw new Exception($"Environment '{env}' not found in {connectionsPath}.");
+            if (envConfig.SourceConnections is null || envConfig.SourceConnections.Count == 0)
+                throw new Exception($"Environment '{env}' must define at least one source connection under 'sourceConnections' in {connectionsPath}.");
 
             var tokenProvider = new TokenProvider(envConfig.Auth);
 
 
             var testConnectionsFlag = parsedArgs.TestConnections;
             var runDeleteDetection = parsedArgs.DeleteDetection;
-
-            var sourceSchemaReader = new SourceSchemaReader(
-                envConfig.SourceSql.ConnectionString,
-                envConfig.SchemaDiscovery,
-                envConfig.SourceSql.CommandTimeoutSeconds,
-                logger);
-            var sourceChunkReader = new SourceChunkReader(
-                envConfig.SourceSql.ConnectionString,
-                envConfig.SourceSql.CommandTimeoutSeconds,
-                logger);
 
             var uploader = new OneLakeUploader(envConfig.OneLakeStaging, tokenProvider, logger);
             var csvWriter = new CsvGzipWriter();
@@ -96,17 +88,20 @@ public static class Program
             {
                 logger.LogInformation("{LogPrefix} Running connection tests...", appPrefix);
 
-                // 1) Test source SQL connection (open/close)
-                try
+                // 1) Test source SQL connections (open/close)
+                foreach (var (sourceName, sourceCfg) in envConfig.SourceConnections)
                 {
-                    await using var conn = new SqlConnection(envConfig.SourceSql.ConnectionString);
-                    await conn.OpenAsync();
-                    logger.LogInformation("{LogPrefix} Source SQL: OK", appPrefix);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogError(ex, "{LogPrefix} Source SQL: FAILED", appPrefix);
-                    return 2;
+                    try
+                    {
+                        await using var conn = new SqlConnection(sourceCfg.ConnectionString);
+                        await conn.OpenAsync();
+                        logger.LogInformation("{LogPrefix} Source SQL ({SourceConnection}): OK", appPrefix, sourceName);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "{LogPrefix} Source SQL ({SourceConnection}): FAILED", appPrefix, sourceName);
+                        return 2;
+                    }
                 }
 
                 // 2) Test warehouse SQL connection (open/close)
@@ -197,6 +192,21 @@ public static class Program
             async Task ProcessStreamAsync(ResolvedStreamConfig stream)
             {
                 var streamPrefix = $"[stream={stream.Name}]";
+                if (!envConfig.SourceConnections.TryGetValue(stream.SourceConnection, out var sourceCfg))
+                    throw new Exception(
+                        $"Stream '{stream.Name}' references unknown sourceConnection '{stream.SourceConnection}'. " +
+                        $"Defined sourceConnections: {string.Join(", ", envConfig.SourceConnections.Keys.OrderBy(x => x))}.");
+
+                var sourceSchemaReader = new SourceSchemaReader(
+                    sourceCfg.ConnectionString,
+                    envConfig.SchemaDiscovery,
+                    sourceCfg.CommandTimeoutSeconds,
+                    logger);
+                var sourceChunkReader = new SourceChunkReader(
+                    sourceCfg.ConnectionString,
+                    sourceCfg.CommandTimeoutSeconds,
+                    logger);
+
                 logger.LogInformation("{LogPrefix} === Stream: {StreamName} ===", streamPrefix, stream.Name);
                 var stagingFileFormat = NormalizeStagingFileFormat(stream.StagingFileFormat);
                 logger.LogInformation("{LogPrefix} Stream staging file format: {StagingFileFormat}", streamPrefix, stagingFileFormat);
@@ -502,8 +512,9 @@ public static class Program
             {
                 var streamPrefix = $"[stream={stream.Name}]";
                 logger.LogDebug(
-                    "{LogPrefix} Resolved stream config: sourceSql={SourceSql}; targetSchema={TargetSchema}; targetTable={TargetTable}; primaryKey=[{PrimaryKey}]; excludeColumns=[{ExcludeColumns}]; updateKey={UpdateKey}; chunkSize={ChunkSize}; stagingFileFormat={StagingFileFormat}; deleteDetectionType={DeleteDetectionType}; deleteDetectionWhere={DeleteDetectionWhere}",
+                    "{LogPrefix} Resolved stream config: sourceConnection={SourceConnection}; sourceSql={SourceSql}; targetSchema={TargetSchema}; targetTable={TargetTable}; primaryKey=[{PrimaryKey}]; excludeColumns=[{ExcludeColumns}]; updateKey={UpdateKey}; chunkSize={ChunkSize}; stagingFileFormat={StagingFileFormat}; deleteDetectionType={DeleteDetectionType}; deleteDetectionWhere={DeleteDetectionWhere}",
                     streamPrefix,
+                    stream.SourceConnection,
                     stream.SourceSql,
                     stream.TargetSchema ?? "<env-default>",
                     stream.TargetTable,

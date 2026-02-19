@@ -7,7 +7,7 @@ public sealed class ConnectionsRoot
 
 public sealed class EnvironmentConfig
 {
-    public SourceSqlConfig SourceSql { get; set; } = new();
+    public Dictionary<string, SourceSqlConfig> SourceConnections { get; set; } = new(StringComparer.OrdinalIgnoreCase);
     public FabricWarehouseConfig FabricWarehouse { get; set; } = new();
     public OneLakeStagingConfig OneLakeStaging { get; set; } = new();
     public AuthConfig Auth { get; set; } = new();
