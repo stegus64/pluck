@@ -2,7 +2,7 @@ using System.Globalization;
 using System.Text;
 using Microsoft.Data.SqlClient;
 
-namespace FabricIncrementalReplicator.Util;
+namespace Pluck.Util;
 
 public static class SqlLogFormatter
 {

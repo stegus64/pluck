@@ -1,10 +1,10 @@
 using System.Globalization;
-using FabricIncrementalReplicator.Source;
+using Pluck.Source;
 using Parquet;
 using Parquet.Data;
 using Parquet.Schema;
 
-namespace FabricIncrementalReplicator.Staging;
+namespace Pluck.Staging;
 
 public sealed class ParquetChunkWriter
 {

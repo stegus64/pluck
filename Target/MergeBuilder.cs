@@ -1,6 +1,6 @@
-using FabricIncrementalReplicator.Source;
+using Pluck.Source;
 
-namespace FabricIncrementalReplicator.Target;
+namespace Pluck.Target;
 
 public static class MergeBuilder
 {
@@ -20,11 +20,11 @@ public static class MergeBuilder
 
         var setAssignments = new List<string>();
         setAssignments.AddRange(nonPkCols.Select(c => $"t.[{c}] = s.[{c}]"));
-        setAssignments.Add("t.[_sg_update_datetime] = SYSUTCDATETIME()");
-        setAssignments.Add("t.[_sg_update_op] = 'U'");
+        setAssignments.Add("t.[_pluck_update_datetime] = SYSUTCDATETIME()");
+        setAssignments.Add("t.[_pluck_update_op] = 'U'");
         var setClause = string.Join(", ", setAssignments);
 
-        var insertCols = string.Join(", ", columns.Select(c => $"[{c.Name}]").Concat(["[_sg_update_datetime]", "[_sg_update_op]"]));
+        var insertCols = string.Join(", ", columns.Select(c => $"[{c.Name}]").Concat(["[_pluck_update_datetime]", "[_pluck_update_op]"]));
         var insertVals = string.Join(", ", columns.Select(c => $"s.[{c.Name}]").Concat(["SYSUTCDATETIME()", "'I'"]));
 
         return $@"

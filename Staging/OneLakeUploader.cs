@@ -1,9 +1,9 @@
 using Azure.Storage.Files.DataLake;
-using FabricIncrementalReplicator.Auth;
-using FabricIncrementalReplicator.Config;
+using Pluck.Auth;
+using Pluck.Config;
 using Microsoft.Extensions.Logging;
 
-namespace FabricIncrementalReplicator.Staging;
+namespace Pluck.Staging;
 
 public sealed class OneLakeUploader
 {

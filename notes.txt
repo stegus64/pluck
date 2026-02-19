@@ -28,8 +28,8 @@ up to a year back or something like that.
 If we want subset handling we should add a where condition both when getting the primary keys from the source and when selecting the 
 part of the target table to compare with the source keys.
 To handle this we should add a couple of new metadata columns to the target table:
-    _sg_update_datetime The datetime when this row was last updated (by insert, update, or soft delete)
-    _sg_update_op       The operation that last updated this row 'I' for insert, 'U' for update, 'D' for soft delete
+    _pluck_update_datetime The datetime when this row was last updated (by insert, update, or soft delete)
+    _pluck_update_op       The operation that last updated this row 'I' for insert, 'U' for update, 'D' for soft delete
 
 The new metadata columns should always be added even if delete detection is not used
 

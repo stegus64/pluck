@@ -1,4 +1,4 @@
-namespace FabricIncrementalReplicator.Util;
+namespace Pluck.Util;
 
 public static class TypeMapper
 {

@@ -1,9 +1,9 @@
-using FabricIncrementalReplicator.Source;
-using FabricIncrementalReplicator.Util;
+using Pluck.Source;
+using Pluck.Util;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 
-namespace FabricIncrementalReplicator.Target;
+namespace Pluck.Target;
 
 public sealed class WarehouseSchemaManager
 {
@@ -103,15 +103,15 @@ WHERE s.name = @schema AND t.name = @table;
     {
         var cols = await GetTargetColumnsAsync(conn, schema, table, logPrefix);
 
-        if (!cols.Contains("_sg_update_datetime"))
+        if (!cols.Contains("_pluck_update_datetime"))
         {
-            var sql = $@"ALTER TABLE [{schema}].[{table}] ADD [_sg_update_datetime] datetime2(0) NULL;";
+            var sql = $@"ALTER TABLE [{schema}].[{table}] ADD [_pluck_update_datetime] datetime2(0) NULL;";
             await ExecAsync(conn, sql, logPrefix);
         }
 
-        if (!cols.Contains("_sg_update_op"))
+        if (!cols.Contains("_pluck_update_op"))
         {
-            var sql = $@"ALTER TABLE [{schema}].[{table}] ADD [_sg_update_op] char(1) NULL;";
+            var sql = $@"ALTER TABLE [{schema}].[{table}] ADD [_pluck_update_op] char(1) NULL;";
             await ExecAsync(conn, sql, logPrefix);
         }
     }

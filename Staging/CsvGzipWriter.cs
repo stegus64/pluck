@@ -2,9 +2,9 @@ using System.Globalization;
 using System.IO.Compression;
 using CsvHelper;
 using CsvHelper.Configuration;
-using FabricIncrementalReplicator.Source;
+using Pluck.Source;
 
-namespace FabricIncrementalReplicator.Staging;
+namespace Pluck.Staging;
 
 public sealed record ChunkWriteResult(int RowCount);
 

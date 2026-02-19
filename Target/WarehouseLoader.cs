@@ -1,10 +1,10 @@
-using FabricIncrementalReplicator.Config;
-using FabricIncrementalReplicator.Source;
-using FabricIncrementalReplicator.Util;
+using Pluck.Config;
+using Pluck.Source;
+using Pluck.Util;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 
-namespace FabricIncrementalReplicator.Target;
+namespace Pluck.Target;
 
 public sealed record WarehouseChunkMetrics(TimeSpan CopyIntoElapsed, TimeSpan MergeElapsed);
 public sealed record WarehouseDeleteMetrics(TimeSpan CopyIntoElapsed, TimeSpan SoftDeleteElapsed, int AffectedRows);
@@ -138,8 +138,8 @@ CREATE TABLE [{targetSchema}].[{sourceKeysTempTable}] (
         var subsetPredicate = string.IsNullOrWhiteSpace(subsetWhere) ? "1=1" : $"({subsetWhere})";
         var softDeleteSql = $@"
 UPDATE t
-SET t.[_sg_update_datetime] = SYSUTCDATETIME(),
-    t.[_sg_update_op] = 'D'
+SET t.[_pluck_update_datetime] = SYSUTCDATETIME(),
+    t.[_pluck_update_op] = 'D'
 FROM [{targetSchema}].[{targetTable}] AS t
 WHERE {subsetPredicate}
   AND NOT EXISTS (
@@ -147,7 +147,7 @@ WHERE {subsetPredicate}
       FROM [{targetSchema}].[{sourceKeysTempTable}] AS s
       WHERE {pkJoin}
   )
-  AND ISNULL(t.[_sg_update_op], '') <> 'D';
+  AND ISNULL(t.[_pluck_update_op], '') <> 'D';
 ";
         var (softDeleteElapsed, affectedRows) = await ExecWithRowsAsync(conn, softDeleteSql, "soft delete missing rows", logPrefix);
 

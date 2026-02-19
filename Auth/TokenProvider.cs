@@ -1,8 +1,8 @@
 using Azure.Core;
 using Azure.Identity;
-using FabricIncrementalReplicator.Config;
+using Pluck.Config;
 
-namespace FabricIncrementalReplicator.Auth;
+namespace Pluck.Auth;
 
 public sealed class TokenProvider
 {

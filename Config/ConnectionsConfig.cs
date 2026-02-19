@@ -1,4 +1,4 @@
-namespace FabricIncrementalReplicator.Config;
+namespace Pluck.Config;
 
 public sealed class ConnectionsRoot
 {

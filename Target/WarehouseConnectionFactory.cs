@@ -1,9 +1,9 @@
-using FabricIncrementalReplicator.Auth;
-using FabricIncrementalReplicator.Config;
+using Pluck.Auth;
+using Pluck.Config;
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 
-namespace FabricIncrementalReplicator.Target;
+namespace Pluck.Target;
 
 public sealed class WarehouseConnectionFactory
 {

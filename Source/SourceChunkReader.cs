@@ -1,9 +1,9 @@
 using Microsoft.Data.SqlClient;
 using Microsoft.Extensions.Logging;
 using System.Runtime.CompilerServices;
-using FabricIncrementalReplicator.Util;
+using Pluck.Util;
 
-namespace FabricIncrementalReplicator.Source;
+namespace Pluck.Source;
 
 public sealed class SourceChunkReader
 {

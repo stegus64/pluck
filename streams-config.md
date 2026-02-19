@@ -197,8 +197,8 @@ Behavior:
 - Source primary keys are fetched in one pass (not chunked).
 - Any target row in the selected subset with no matching source key is soft-deleted.
 - Soft delete means:
-  - `_sg_update_op = 'D'`
-  - `_sg_update_datetime = SYSUTCDATETIME()`
+  - `_pluck_update_op = 'D'`
+  - `_pluck_update_datetime = SYSUTCDATETIME()`
 
 ## Full Example
 
@@ -237,8 +237,8 @@ streams:
 
 The loader always ensures these metadata columns exist in every target table:
 
-- `_sg_update_datetime` (`datetime2(0)`): timestamp of last insert/update/soft-delete.
-- `_sg_update_op` (`char(1)`): last operation:
+- `_pluck_update_datetime` (`datetime2(0)`): timestamp of last insert/update/soft-delete.
+- `_pluck_update_op` (`char(1)`): last operation:
   - `'I'` = insert
   - `'U'` = update
   - `'D'` = soft delete

@@ -1,6 +1,6 @@
-using FabricIncrementalReplicator.Source;
+using Pluck.Source;
 
-namespace FabricIncrementalReplicator.Util;
+namespace Pluck.Util;
 
 public static class SchemaValidator
 {

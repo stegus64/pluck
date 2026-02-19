@@ -1,7 +1,7 @@
 using YamlDotNet.Serialization;
 using YamlDotNet.Serialization.NamingConventions;
 
-namespace FabricIncrementalReplicator.Config;
+namespace Pluck.Config;
 
 public sealed class YamlLoader
 {

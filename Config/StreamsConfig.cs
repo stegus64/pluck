@@ -1,6 +1,6 @@
 using YamlDotNet.Serialization;
 
-namespace FabricIncrementalReplicator.Config;
+namespace Pluck.Config;
 
 public sealed class StreamsConfig
 {

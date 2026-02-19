@@ -1,15 +1,15 @@
-using FabricIncrementalReplicator.Auth;
+using Pluck.Auth;
 using Microsoft.Extensions.Logging;
 using Microsoft.Data.SqlClient;
-using FabricIncrementalReplicator.Config;
-using FabricIncrementalReplicator.Source;
-using FabricIncrementalReplicator.Staging;
-using FabricIncrementalReplicator.Target;
-using FabricIncrementalReplicator.Util;
+using Pluck.Config;
+using Pluck.Source;
+using Pluck.Staging;
+using Pluck.Target;
+using Pluck.Util;
 using System.Globalization;
 using System.Text.RegularExpressions;
 
-namespace FabricIncrementalReplicator;
+namespace Pluck;
 
 public static class Program
 {
@@ -223,12 +223,12 @@ public static class Program
 
                 // 1) Discover schema of the source query
                 var sourceColumns = await sourceSchemaReader.DescribeQueryAsync(stream.SourceSql, streamPrefix);
-                if (sourceColumns.Any(c => c.Name.Equals("_sg_update_datetime", StringComparison.OrdinalIgnoreCase) ||
-                                           c.Name.Equals("_sg_update_op", StringComparison.OrdinalIgnoreCase)))
+                if (sourceColumns.Any(c => c.Name.Equals("_pluck_update_datetime", StringComparison.OrdinalIgnoreCase) ||
+                                           c.Name.Equals("_pluck_update_op", StringComparison.OrdinalIgnoreCase)))
                 {
                     throw new Exception(
                         $"Stream '{stream.Name}' source query includes reserved metadata column names " +
-                        "('_sg_update_datetime' or '_sg_update_op').");
+                        "('_pluck_update_datetime' or '_pluck_update_op').");
                 }
                 var excludedColumns = new HashSet<string>(stream.ExcludeColumns ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
                 if (excludedColumns.Count > 0)
@@ -676,7 +676,7 @@ public static class Program
     {
         // Keep this list in sync with runtime argument handling in Main when adding/removing parameters.
         Console.WriteLine("Usage:");
-        Console.WriteLine("  mysling [options]");
+        Console.WriteLine("  pluck [options]");
         Console.WriteLine();
         Console.WriteLine("Options:");
         Console.WriteLine("  --help, -h");

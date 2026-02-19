@@ -1,4 +1,4 @@
-# Copilot Instructions for the mysling project
+# Copilot Instructions for the pluck project
 
 Purpose
 - Provide quick, actionable guidance to Copilot/GitHub Copilot when editing this repository.
@@ -13,7 +13,7 @@ Original prompt that generated this project
 
 Project overview
 - Language: C# targeting .NET 8.0.
-- Solution: mysling.sln (root). Main executable: `program.cs`.
+- Solution: pluck.sln (root). Main executable: `program.cs`.
 - Key folders and responsibilities:
   - `Auth/`: authentication helpers (e.g., `TokenProvider.cs`).
   - `Config/`: configuration loaders and types (`YamlLoader.cs`, `ConnectionsConfig.cs`, `StreamsConfig.cs`).
@@ -24,7 +24,7 @@ Project overview
 
 Build & run
 - Build: `dotnet build` from repo root.
-- Run: `dotnet run --project mysling.csproj` or use the produced executable in `bin/Debug/net8.0/`.
+- Run: `dotnet run --project pluck.csproj` or use the produced executable in `bin/Debug/net8.0/`.
 
 Guidelines for Copilot
 - Keep changes minimal and focused: modify only the files required to implement the requested feature or fix.

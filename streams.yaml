@@ -8,8 +8,6 @@ defaults:
     excludeColumns: ["DW_Version"]
     # "csv", "csv.gz", or "parquet"
     stagingFileFormat: "csv.gz"
-    # stagingFileFormat: "parquet"
-    # stagingFileFormat: "csv"
     targetTable: "{stream_table}"
     sourceSql: "SELECT * FROM dbo.{stream_table} -- WHERE DW_Rowid <= 1510000"
 

@@ -1,7 +1,7 @@
 using Microsoft.Data.SqlClient;
-using FabricIncrementalReplicator.Util;
+using Pluck.Util;
 
-namespace FabricIncrementalReplicator.Source;
+namespace Pluck.Source;
 
 using Microsoft.Extensions.Logging;
 
