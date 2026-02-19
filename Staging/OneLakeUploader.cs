@@ -42,7 +42,7 @@ public sealed class OneLakeUploader
         }
     }
 
-    public async Task<string> UploadAsync(string localPath, string relativeFileName)
+    public async Task<string> UploadAsync(string localPath, string relativeFileName, string? logPrefix = null)
     {
         var fs = _svc.GetFileSystemClient(_fileSystemName);
         await EnsureDirectoryPathExistsAsync(fs, _baseDirectoryPath);
@@ -51,26 +51,26 @@ public sealed class OneLakeUploader
         var file = fs.GetFileClient(fullPath);
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogDebug("Staging upload: CreateIfNotExists for {Path}", fullPath);
+        _log.LogDebug("{LogPrefix}Staging upload: CreateIfNotExists for {Path}", Prefix(logPrefix), fullPath);
         await file.CreateIfNotExistsAsync();
 
         await using var stream = File.OpenRead(localPath);
-        _log.LogDebug("Staging upload: Append start for {Path}", fullPath);
+        _log.LogDebug("{LogPrefix}Staging upload: Append start for {Path}", Prefix(logPrefix), fullPath);
         await file.AppendAsync(stream, offset: 0);
         await file.FlushAsync(position: stream.Length);
         sw.Stop();
-        _log.LogDebug("Staging upload elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        _log.LogDebug("{LogPrefix}Staging upload elapsed: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
 
         return BuildPublicUrl(_stagingBaseUrl, relativeFileName, _stagingQuery);
     }
 
-    public async Task TryDeleteAsync(string relativeFileName)
+    public async Task TryDeleteAsync(string relativeFileName, string? logPrefix = null)
     {
         try
         {
             var fs = _svc.GetFileSystemClient(_fileSystemName);
             var fullPath = CombinePath(_baseDirectoryPath, relativeFileName);
-            _log.LogDebug("Staging delete attempt: {Path}", fullPath);
+            _log.LogDebug("{LogPrefix}Staging delete attempt: {Path}", Prefix(logPrefix), fullPath);
             await fs.DeleteFileAsync(fullPath);
         }
         catch
@@ -146,4 +146,7 @@ public sealed class OneLakeUploader
 
         return $"{path}{query}";
     }
+
+    private static string Prefix(string? logPrefix) =>
+        string.IsNullOrWhiteSpace(logPrefix) ? "[app] " : $"{logPrefix} ";
 }

@@ -20,7 +20,7 @@ public sealed class WarehouseConnectionFactory
 
     public int CommandTimeoutSeconds => _cfg.CommandTimeoutSeconds > 0 ? _cfg.CommandTimeoutSeconds : 3600;
 
-    public async Task<SqlConnection> OpenAsync(CancellationToken ct = default)
+    public async Task<SqlConnection> OpenAsync(string? logPrefix = null, CancellationToken ct = default)
     {
         var cs = new SqlConnectionStringBuilder
         {
@@ -34,13 +34,16 @@ public sealed class WarehouseConnectionFactory
 
         // Fabric Warehouse uses Entra ID; use AAD token for "https://database.windows.net/.default"
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogDebug("Requesting AAD token for SQL");
+        _log.LogDebug("{LogPrefix}Requesting AAD token for SQL", Prefix(logPrefix));
         var token = await _tokenProvider.GetTokenAsync(new[] { "https://database.windows.net/.default" }, ct);
         conn.AccessToken = token;
-        _log.LogDebug("Acquired token (masked)");
+        _log.LogDebug("{LogPrefix}Acquired token (masked)", Prefix(logPrefix));
         await conn.OpenAsync(ct);
         sw.Stop();
-        _log.LogDebug("SQL OpenAsync elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        _log.LogDebug("{LogPrefix}SQL OpenAsync elapsed: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
         return conn;
     }
+
+    private static string Prefix(string? logPrefix) =>
+        string.IsNullOrWhiteSpace(logPrefix) ? "[app] " : $"{logPrefix} ";
 }

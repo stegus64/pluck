@@ -17,7 +17,7 @@ public sealed class SourceChunkReader
         _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
-    public async Task<(object? Min, object? Max)> GetMinMaxUpdateKeyAsync(string sourceSql, string updateKey, object? watermark)
+    public async Task<(object? Min, object? Max)> GetMinMaxUpdateKeyAsync(string sourceSql, string updateKey, object? watermark, string? logPrefix = null)
     {
         var sql = $@"
 WITH src AS (
@@ -34,11 +34,12 @@ WHERE (@watermark IS NULL OR [{updateKey}] > @watermark);
         cmd.CommandTimeout = _commandTimeoutSeconds;
         cmd.Parameters.AddWithValue("@watermark", watermark ?? DBNull.Value);
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogDebug("SQL GetMinMax: {Sql}", sql);
-        _log.LogDebug("SQL GetMinMax Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
+        _log.LogDebug("{LogPrefix}GetMinMax execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL GetMinMax: {Sql}", Prefix(logPrefix), sql);
+        _log.LogTrace("{LogPrefix}SQL GetMinMax Params: {Params}", Prefix(logPrefix), SqlLogFormatter.FormatParameters(cmd.Parameters));
         await using var rdr = await cmd.ExecuteReaderAsync();
         sw.Stop();
-        _log.LogDebug("GetMinMax execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        _log.LogDebug("{LogPrefix}GetMinMax execution time: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
         if (!await rdr.ReadAsync()) return (null, null);
 
         return (rdr.IsDBNull(0) ? null : rdr.GetValue(0),
@@ -51,6 +52,7 @@ WHERE (@watermark IS NULL OR [{updateKey}] > @watermark);
         string updateKey,
         object lowerBoundInclusive,
         object upperBoundExclusive,
+        string? logPrefix = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         var selectList = string.Join(", ", columns.Select(c => $"[{c.Name}]"));
@@ -74,11 +76,12 @@ WHERE [{updateKey}] >= @lowerBound
         cmd.Parameters.AddWithValue("@upperBound", upperBoundExclusive);
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogDebug("SQL ReadChunkByInterval: {Sql}", sql);
-        _log.LogDebug("SQL ReadChunkByInterval Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
+        _log.LogDebug("{LogPrefix}ReadChunkByInterval execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL ReadChunkByInterval: {Sql}", Prefix(logPrefix), sql);
+        _log.LogTrace("{LogPrefix}SQL ReadChunkByInterval Params: {Params}", Prefix(logPrefix), SqlLogFormatter.FormatParameters(cmd.Parameters));
         await using var rdr = await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess, ct);
         sw.Stop();
-        _log.LogDebug("ReadChunkByInterval execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        _log.LogDebug("{LogPrefix}ReadChunkByInterval execution time: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
 
         while (await rdr.ReadAsync(ct))
         {
@@ -96,6 +99,7 @@ WHERE [{updateKey}] >= @lowerBound
         string updateKey,
         object lowerBoundInclusive,
         object maxInclusive,
+        string? logPrefix = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         var selectList = string.Join(", ", columns.Select(c => $"[{c.Name}]"));
@@ -119,11 +123,12 @@ WHERE [{updateKey}] >= @lowerBound
         cmd.Parameters.AddWithValue("@maxInclusive", maxInclusive);
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogDebug("SQL ReadChunkFromLowerBound: {Sql}", sql);
-        _log.LogDebug("SQL ReadChunkFromLowerBound Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
+        _log.LogDebug("{LogPrefix}ReadChunkFromLowerBound execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL ReadChunkFromLowerBound: {Sql}", Prefix(logPrefix), sql);
+        _log.LogTrace("{LogPrefix}SQL ReadChunkFromLowerBound Params: {Params}", Prefix(logPrefix), SqlLogFormatter.FormatParameters(cmd.Parameters));
         await using var rdr = await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess, ct);
         sw.Stop();
-        _log.LogDebug("ReadChunkFromLowerBound execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        _log.LogDebug("{LogPrefix}ReadChunkFromLowerBound execution time: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
 
         while (await rdr.ReadAsync(ct))
         {
@@ -139,6 +144,7 @@ WHERE [{updateKey}] >= @lowerBound
         string sourceSql,
         List<string> columnNames,
         string? whereClause = null,
+        string? logPrefix = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         var selectList = string.Join(", ", columnNames.Select(c => $"[{c}]"));
@@ -159,10 +165,11 @@ FROM src{whereSql};
         cmd.CommandTimeout = _commandTimeoutSeconds;
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogDebug("SQL ReadColumns: {Sql}", sql);
+        _log.LogDebug("{LogPrefix}ReadColumns execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL ReadColumns: {Sql}", Prefix(logPrefix), sql);
         await using var rdr = await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess, ct);
         sw.Stop();
-        _log.LogDebug("ReadColumns execution time: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        _log.LogDebug("{LogPrefix}ReadColumns execution time: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
 
         while (await rdr.ReadAsync(ct))
         {
@@ -173,4 +180,7 @@ FROM src{whereSql};
             yield return values;
         }
     }
+
+    private static string Prefix(string? logPrefix) =>
+        string.IsNullOrWhiteSpace(logPrefix) ? "[app] " : $"{logPrefix} ";
 }

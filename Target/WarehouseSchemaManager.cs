@@ -15,16 +15,16 @@ public sealed class WarehouseSchemaManager
         _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
-    public async Task EnsureTableAndSchemaAsync(string schema, string table, List<SourceColumn> sourceColumns, List<string> primaryKey)
+    public async Task EnsureTableAndSchemaAsync(string schema, string table, List<SourceColumn> sourceColumns, List<string> primaryKey, string? logPrefix = null)
     {
-        await using var conn = await _factory.OpenAsync();
+        await using var conn = await _factory.OpenAsync(logPrefix: logPrefix);
 
         // Ensure schema exists
         var ensureSchemaSql = $@"
 IF NOT EXISTS (SELECT 1 FROM sys.schemas WHERE name = @schema)
     EXEC('CREATE SCHEMA [{schema}]');
 ";
-        await ExecAsync(conn, ensureSchemaSql, ("@schema", schema));
+        await ExecAsync(conn, ensureSchemaSql, logPrefix, ("@schema", schema));
 
         // Create table if not exists
         var colDefs = string.Join(",\n",
@@ -38,10 +38,10 @@ BEGIN
     )');
 END
 ";
-        await ExecAsync(conn, createSql, ("@fullName", $"{schema}.{table}"));
+        await ExecAsync(conn, createSql, logPrefix, ("@fullName", $"{schema}.{table}"));
 
         // Add missing columns
-        var targetCols = await GetTargetColumnsAsync(conn, schema, table);
+        var targetCols = await GetTargetColumnsAsync(conn, schema, table, logPrefix);
 
         var missing = sourceColumns
             .Where(sc => !targetCols.Contains(sc.Name, StringComparer.OrdinalIgnoreCase))
@@ -50,13 +50,13 @@ END
         foreach (var m in missing)
         {
             var addSql = $@"ALTER TABLE [{schema}].[{table}] ADD [{m.Name}] {TypeMapper.SqlServerToFabricWarehouseType(m.SqlServerTypeName)} NULL;";
-            await ExecAsync(conn, addSql);
+            await ExecAsync(conn, addSql, logPrefix);
         }
 
-        await EnsureMetadataColumnsAsync(conn, schema, table);
+        await EnsureMetadataColumnsAsync(conn, schema, table, logPrefix);
     }
 
-    private async Task<HashSet<string>> GetTargetColumnsAsync(SqlConnection conn, string schema, string table)
+    private async Task<HashSet<string>> GetTargetColumnsAsync(SqlConnection conn, string schema, string table, string? logPrefix = null)
     {
         var sql = @"
 SELECT c.name
@@ -72,17 +72,18 @@ WHERE s.name = @schema AND t.name = @table;
 
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogDebug("SQL GetTargetColumns: {Sql}", sql);
-        _log.LogDebug("SQL GetTargetColumns Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
+        _log.LogDebug("{LogPrefix}GetTargetColumns execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL GetTargetColumns: {Sql}", Prefix(logPrefix), sql);
+        _log.LogTrace("{LogPrefix}SQL GetTargetColumns Params: {Params}", Prefix(logPrefix), SqlLogFormatter.FormatParameters(cmd.Parameters));
         await using var rdr = await cmd.ExecuteReaderAsync();
         sw.Stop();
-        _log.LogDebug("GetTargetColumns elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        _log.LogDebug("{LogPrefix}GetTargetColumns elapsed: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
         while (await rdr.ReadAsync())
             set.Add(rdr.GetString(0));
         return set;
     }
 
-    private async Task ExecAsync(SqlConnection conn, string sql, params (string Name, object Value)[] prms)
+    private async Task ExecAsync(SqlConnection conn, string sql, string? logPrefix = null, params (string Name, object Value)[] prms)
     {
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
@@ -90,27 +91,31 @@ WHERE s.name = @schema AND t.name = @table;
             cmd.Parameters.AddWithValue(n, v ?? DBNull.Value);
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogDebug("SQL Exec: {Sql}", sql);
-        _log.LogDebug("SQL Exec Params: {Params}", SqlLogFormatter.FormatParameters(cmd.Parameters));
+        _log.LogDebug("{LogPrefix}SQL Exec started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL Exec: {Sql}", Prefix(logPrefix), sql);
+        _log.LogTrace("{LogPrefix}SQL Exec Params: {Params}", Prefix(logPrefix), SqlLogFormatter.FormatParameters(cmd.Parameters));
         await cmd.ExecuteNonQueryAsync();
         sw.Stop();
-        _log.LogDebug("Exec elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+        _log.LogDebug("{LogPrefix}Exec elapsed: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
     }
 
-    private async Task EnsureMetadataColumnsAsync(SqlConnection conn, string schema, string table)
+    private async Task EnsureMetadataColumnsAsync(SqlConnection conn, string schema, string table, string? logPrefix = null)
     {
-        var cols = await GetTargetColumnsAsync(conn, schema, table);
+        var cols = await GetTargetColumnsAsync(conn, schema, table, logPrefix);
 
         if (!cols.Contains("_sg_update_datetime"))
         {
             var sql = $@"ALTER TABLE [{schema}].[{table}] ADD [_sg_update_datetime] datetime2(6) NULL;";
-            await ExecAsync(conn, sql);
+            await ExecAsync(conn, sql, logPrefix);
         }
 
         if (!cols.Contains("_sg_update_op"))
         {
             var sql = $@"ALTER TABLE [{schema}].[{table}] ADD [_sg_update_op] char(1) NULL;";
-            await ExecAsync(conn, sql);
+            await ExecAsync(conn, sql, logPrefix);
         }
     }
+
+    private static string Prefix(string? logPrefix) =>
+        string.IsNullOrWhiteSpace(logPrefix) ? "[app] " : $"{logPrefix} ";
 }

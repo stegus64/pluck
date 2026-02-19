@@ -15,13 +15,18 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        const string appPrefix = "[app]";
         // Configure logging
+        var traceFlag = args.Any(a => a.Equals("--trace", StringComparison.OrdinalIgnoreCase));
         var debugFlag = args.Any(a => a.Equals("--debug", StringComparison.OrdinalIgnoreCase));
-        var logLevelArg = debugFlag
+        var logLevelArg = traceFlag
+            ? "TRACE"
+            : debugFlag
             ? "DEBUG"
             : (GetArg(args, "--log-level") ?? "INFO");
         var minLogLevel = logLevelArg.ToUpperInvariant() switch
         {
+            "TRACE" => Microsoft.Extensions.Logging.LogLevel.Trace,
             "ERROR" => Microsoft.Extensions.Logging.LogLevel.Error,
             "DEBUG" => Microsoft.Extensions.Logging.LogLevel.Debug,
             _ => Microsoft.Extensions.Logging.LogLevel.Information,
@@ -73,30 +78,30 @@ public static class Program
 
             if (testConnectionsFlag)
             {
-                logger.LogInformation("Running connection tests...");
+                logger.LogInformation("{LogPrefix} Running connection tests...", appPrefix);
 
                 // 1) Test source SQL connection (open/close)
                 try
                 {
                     await using var conn = new SqlConnection(envConfig.SourceSql.ConnectionString);
                     await conn.OpenAsync();
-                    logger.LogInformation("Source SQL: OK");
+                    logger.LogInformation("{LogPrefix} Source SQL: OK", appPrefix);
                 }
                 catch (Exception ex)
                 {
-                    logger.LogError(ex, "Source SQL: FAILED");
+                    logger.LogError(ex, "{LogPrefix} Source SQL: FAILED", appPrefix);
                     return 2;
                 }
 
                 // 2) Test warehouse SQL connection (open/close)
                 try
                 {
-                    using var conn = await warehouseConnFactory.OpenAsync();
-                    logger.LogInformation("SQL Warehouse: OK");
+                    using var conn = await warehouseConnFactory.OpenAsync(logPrefix: appPrefix);
+                    logger.LogInformation("{LogPrefix} SQL Warehouse: OK", appPrefix);
                 }
                 catch (Exception ex)
                 {
-                    logger.LogError(ex, "SQL Warehouse: FAILED");
+                    logger.LogError(ex, "{LogPrefix} SQL Warehouse: FAILED", appPrefix);
                     return 3;
                 }
 
@@ -104,29 +109,30 @@ public static class Program
                 try
                 {
                     await uploader.TestConnectionAsync();
-                    logger.LogInformation("Staging lake: OK");
+                    logger.LogInformation("{LogPrefix} Staging lake: OK", appPrefix);
                 }
                 catch (Exception ex)
                 {
-                    logger.LogError(ex, "Staging lake: FAILED");
+                    logger.LogError(ex, "{LogPrefix} Staging lake: FAILED", appPrefix);
                     return 4;
                 }
 
-                logger.LogInformation("All connection checks passed.");
+                logger.LogInformation("{LogPrefix} All connection checks passed.", appPrefix);
                 return 0;
             }
 
             foreach (var stream in streams.GetResolvedStreams())
             {
-                logger.LogInformation("=== Stream: {StreamName} ===", stream.Name);
+                var streamPrefix = $"[stream={stream.Name}]";
+                logger.LogInformation("{LogPrefix} === Stream: {StreamName} ===", streamPrefix, stream.Name);
                 var stagingFileFormat = NormalizeStagingFileFormat(stream.StagingFileFormat);
-                logger.LogInformation("Stream staging file format: {StagingFileFormat}", stagingFileFormat);
+                logger.LogInformation("{LogPrefix} Stream staging file format: {StagingFileFormat}", streamPrefix, stagingFileFormat);
 
                 var targetSchema = stream.TargetSchema ?? envConfig.FabricWarehouse.TargetSchema ?? "dbo";
                 var targetTable = stream.TargetTable;
 
                 // 1) Discover schema of the source query
-                var sourceColumns = await sourceSchemaReader.DescribeQueryAsync(stream.SourceSql);
+                var sourceColumns = await sourceSchemaReader.DescribeQueryAsync(stream.SourceSql, streamPrefix);
                 if (sourceColumns.Any(c => c.Name.Equals("_sg_update_datetime", StringComparison.OrdinalIgnoreCase) ||
                                            c.Name.Equals("_sg_update_op", StringComparison.OrdinalIgnoreCase)))
                 {
@@ -136,7 +142,7 @@ public static class Program
                 }
                 var excludedColumns = new HashSet<string>(stream.ExcludeColumns ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
                 if (excludedColumns.Count > 0)
-                    logger.LogInformation("Excluded columns for stream {StreamName}: {ExcludedColumns}", stream.Name, string.Join(", ", excludedColumns));
+                    logger.LogInformation("{LogPrefix} Excluded columns for stream {StreamName}: {ExcludedColumns}", streamPrefix, stream.Name, string.Join(", ", excludedColumns));
                 if (excludedColumns.Contains(stream.UpdateKey))
                     throw new Exception($"Stream '{stream.Name}' excludes updateKey column '{stream.UpdateKey}', which is not allowed.");
 
@@ -156,17 +162,19 @@ public static class Program
                     targetSchema,
                     targetTable,
                     sourceColumns,
-                    primaryKey: stream.PrimaryKey
+                    primaryKey: stream.PrimaryKey,
+                    logPrefix: streamPrefix
                 );
 
                 // 3) Read watermark from target
-                object? targetMax = await loaderTarget.GetMaxUpdateKeyAsync(targetSchema, targetTable, stream.UpdateKey);
-                logger.LogInformation("Target watermark (max {UpdateKey}) = {TargetMax}", stream.UpdateKey, FormatLogValue(targetMax));
+                object? targetMax = await loaderTarget.GetMaxUpdateKeyAsync(targetSchema, targetTable, stream.UpdateKey, streamPrefix);
+                logger.LogInformation("{LogPrefix} Target watermark (max {UpdateKey}) = {TargetMax}", streamPrefix, stream.UpdateKey, FormatLogValue(targetMax));
 
                 // 4) Optional logging: source min/max after watermark
-                var (srcMin, srcMax) = await sourceChunkReader.GetMinMaxUpdateKeyAsync(stream.SourceSql, stream.UpdateKey, targetMax);
+                var (srcMin, srcMax) = await sourceChunkReader.GetMinMaxUpdateKeyAsync(stream.SourceSql, stream.UpdateKey, targetMax, streamPrefix);
                 logger.LogInformation(
-                    "Source range after watermark: min={SourceMin}, max={SourceMax}",
+                    "{LogPrefix} Source range after watermark: min={SourceMin}, max={SourceMax}",
+                    streamPrefix,
                     FormatLogValue(srcMin),
                     FormatLogValue(srcMax));
 
@@ -177,6 +185,7 @@ public static class Program
                     var chunkInterval = ParseChunkInterval(stream.ChunkSize, stream.Name);
                     var ext = stagingFileFormat == "parquet" ? "parquet" : (stagingFileFormat == "csv" ? "csv" : "csv.gz");
                     Task<PreparedChunk?>? prepareNextTask = PrepareNextChunkAsync(srcMin, chunkIndex + 1);
+                    string ChunkLogPrefix(int idx) => $"[stream={stream.Name} chunk={idx:D2}]";
 
                     while (prepareNextTask is not null)
                     {
@@ -203,7 +212,8 @@ public static class Program
                             var fileName = $"{stream.Name}/run={runId}/chunk={nextChunkIndex:D6}.{ext}";
                             var localPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"chunk.{ext}");
                             Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
-                            logger.LogDebug("Next chunk local staging path: {LocalPath}", localPath);
+                            var chunkPrefix = ChunkLogPrefix(nextChunkIndex);
+                            logger.LogDebug("{LogPrefix} Next chunk local staging path: {LocalPath}", chunkPrefix, localPath);
 
                             var rowStream = chunkInterval is null
                                 ? sourceChunkReader.ReadChunkFromLowerBoundAsync(
@@ -211,13 +221,15 @@ public static class Program
                                     sourceColumns,
                                     stream.UpdateKey,
                                     lowerBound,
-                                    srcMax)
+                                    srcMax,
+                                    chunkPrefix)
                                 : sourceChunkReader.ReadChunkByIntervalAsync(
                                     stream.SourceSql,
                                     sourceColumns,
                                     stream.UpdateKey,
                                     lowerBound,
-                                    upperBound!);
+                                    upperBound!,
+                                    chunkPrefix);
                             var writeSw = System.Diagnostics.Stopwatch.StartNew();
                             var chunkWrite = stagingFileFormat == "parquet"
                                 ? await parquetWriter.WriteParquetAsync(localPath, sourceColumns, rowStream)
@@ -225,24 +237,25 @@ public static class Program
                                     ? await csvWriter.WriteCsvAsync(localPath, sourceColumns, rowStream)
                                     : await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream);
                             writeSw.Stop();
+                            logger.LogDebug("{LogPrefix} Local file written. Elapsed: {Elapsed}ms", chunkPrefix, writeSw.Elapsed.TotalMilliseconds);
 
                             if (chunkWrite.RowCount == 0)
                             {
                                 if (chunkInterval is null)
                                 {
                                     logger.LogDebug(
-                                        "No rows in single-chunk range [{LowerBound}, {MaxInclusive}] for stream {StreamName}.",
+                                        "{LogPrefix} No rows in single-chunk range [{LowerBound}, {MaxInclusive}].",
+                                        chunkPrefix,
                                         lowerBound,
-                                        srcMax,
-                                        stream.Name);
+                                        srcMax);
                                 }
                                 else
                                 {
                                     logger.LogDebug(
-                                        "No rows in interval chunk [{LowerBound}, {UpperBound}) for stream {StreamName}.",
+                                        "{LogPrefix} No rows in interval chunk [{LowerBound}, {UpperBound}).",
+                                        chunkPrefix,
                                         lowerBound,
-                                        upperBound,
-                                        stream.Name);
+                                        upperBound);
                                 }
 
                                 if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(localPath))
@@ -271,8 +284,9 @@ public static class Program
 
                     async Task ProcessPreparedChunkAsync(PreparedChunk prepared)
                     {
+                        var chunkPrefix = ChunkLogPrefix(prepared.ChunkIndex);
                         var uploadSw = System.Diagnostics.Stopwatch.StartNew();
-                        var oneLakePath = await uploader.UploadAsync(prepared.LocalPath, prepared.FileName);
+                        var oneLakePath = await uploader.UploadAsync(prepared.LocalPath, prepared.FileName, chunkPrefix);
                         uploadSw.Stop();
                         var uploadedFileSizeKb = new FileInfo(prepared.LocalPath).Length / 1024d;
 
@@ -286,7 +300,8 @@ public static class Program
                             expectedRowCount: prepared.RowCount,
                             oneLakeDfsUrl: oneLakePath,
                             stagingFileFormat: stagingFileFormat,
-                            cleanup: envConfig.Cleanup
+                            cleanup: envConfig.Cleanup,
+                            logPrefix: chunkPrefix
                         );
 
                         var totalSeconds =
@@ -301,7 +316,8 @@ public static class Program
                         if (chunkInterval is null)
                         {
                             logger.LogInformation(
-                                "Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, maxInclusive={MaxInclusive}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                                "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, maxInclusive={MaxInclusive}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                                chunkPrefix,
                                 prepared.ChunkIndex,
                                 prepared.RowCount,
                                 prepared.LowerBound,
@@ -316,7 +332,8 @@ public static class Program
                         else
                         {
                             logger.LogInformation(
-                                "Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                                "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                                chunkPrefix,
                                 prepared.ChunkIndex,
                                 prepared.RowCount,
                                 prepared.LowerBound,
@@ -333,12 +350,12 @@ public static class Program
                             File.Delete(prepared.LocalPath);
 
                         if (envConfig.Cleanup.DeleteStagedFiles)
-                            await uploader.TryDeleteAsync(prepared.FileName);
+                            await uploader.TryDeleteAsync(prepared.FileName, chunkPrefix);
                     }
                 }
                 else
                 {
-                    logger.LogInformation("No more rows.");
+                    logger.LogInformation("{LogPrefix} No more rows.", streamPrefix);
                 }
 
                 if (string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
@@ -346,7 +363,7 @@ public static class Program
                     var pkColumns = stream.PrimaryKey
                         .Select(pk => sourceColumns.Single(c => c.Name.Equals(pk, StringComparison.OrdinalIgnoreCase)))
                         .ToList();
-                    var keyStream = sourceChunkReader.ReadColumnsAsync(stream.SourceSql, stream.PrimaryKey, stream.DeleteDetection.Where);
+                    var keyStream = sourceChunkReader.ReadColumnsAsync(stream.SourceSql, stream.PrimaryKey, stream.DeleteDetection.Where, streamPrefix);
 
                     var deleteRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
                     var keysFileName = $"{stream.Name}/run={deleteRunId}/delete-keys.csv.gz";
@@ -358,7 +375,7 @@ public static class Program
                     writeKeysSw.Stop();
 
                     var uploadKeysSw = System.Diagnostics.Stopwatch.StartNew();
-                    var keysDfsUrl = await uploader.UploadAsync(keysLocalPath, keysFileName);
+                    var keysDfsUrl = await uploader.UploadAsync(keysLocalPath, keysFileName, streamPrefix);
                     uploadKeysSw.Stop();
 
                     var keysTempTable = $"__tmp_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
@@ -370,10 +387,12 @@ public static class Program
                         sourceKeysDfsUrl: keysDfsUrl,
                         sourceKeysFileFormat: "csv.gz",
                         subsetWhere: stream.DeleteDetection.Where,
-                        cleanup: envConfig.Cleanup);
+                        cleanup: envConfig.Cleanup,
+                        logPrefix: streamPrefix);
 
                     logger.LogInformation(
-                        "Delete detection ({Type}) stream {StreamName}: sourceKeys={SourceKeys}, subsetWhere={SubsetWhere}, keyWriteMs={KeyWriteMs:F0}, keyUploadMs={KeyUploadMs:F0}, keyCopyMs={KeyCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
+                        "{LogPrefix} Delete detection ({Type}) stream {StreamName}: sourceKeys={SourceKeys}, subsetWhere={SubsetWhere}, keyWriteMs={KeyWriteMs:F0}, keyUploadMs={KeyUploadMs:F0}, keyCopyMs={KeyCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
+                        streamPrefix,
                         stream.DeleteDetection.Type,
                         stream.Name,
                         keyWrite.RowCount,
@@ -387,10 +406,10 @@ public static class Program
                     if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(keysLocalPath))
                         File.Delete(keysLocalPath);
                     if (envConfig.Cleanup.DeleteStagedFiles)
-                        await uploader.TryDeleteAsync(keysFileName);
+                        await uploader.TryDeleteAsync(keysFileName, streamPrefix);
                 }
 
-                logger.LogInformation("=== Stream {StreamName} complete ===", stream.Name);
+                logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
             }
 
             return 0;
@@ -398,13 +417,13 @@ public static class Program
         catch (SqlException ex)
         {
             // SQL errors: concise output without stack trace.
-            logger.LogError("{ExceptionType}: {Message}", ex.GetType().Name, ex.Message);
+            logger.LogError("{LogPrefix} {ExceptionType}: {Message}", appPrefix, ex.GetType().Name, ex.Message);
             return 1;
         }
         catch (Exception ex)
         {
             // Non-SQL errors: full stack trace.
-            logger.LogError(ex, "Unhandled exception during replication run.");
+            logger.LogError(ex, "{LogPrefix} Unhandled exception during replication run.", appPrefix);
             return 1;
         }
     }

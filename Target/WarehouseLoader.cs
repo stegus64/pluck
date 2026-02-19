@@ -19,17 +19,18 @@ public sealed class WarehouseLoader
         _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
-    public async Task<object?> GetMaxUpdateKeyAsync(string schema, string table, string updateKey)
+    public async Task<object?> GetMaxUpdateKeyAsync(string schema, string table, string updateKey, string? logPrefix = null)
     {
-        await using var conn = await _factory.OpenAsync();
+        await using var conn = await _factory.OpenAsync(logPrefix: logPrefix);
         var sql = $"SELECT MAX([{updateKey}]) FROM [{schema}].[{table}];";
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
-        _log.LogDebug("SQL GetMaxUpdateKey: {Sql}", sql);
+        _log.LogDebug("{LogPrefix}GetMaxUpdateKey execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL GetMaxUpdateKey: {Sql}", Prefix(logPrefix), sql);
         var sw0 = System.Diagnostics.Stopwatch.StartNew();
         var v = await cmd.ExecuteScalarAsync();
         sw0.Stop();
-        _log.LogDebug("GetMaxUpdateKey elapsed: {Elapsed}ms", sw0.Elapsed.TotalMilliseconds);
+        _log.LogDebug("{LogPrefix}GetMaxUpdateKey elapsed: {Elapsed}ms", Prefix(logPrefix), sw0.Elapsed.TotalMilliseconds);
         return v is DBNull ? null : v;
     }
 
@@ -42,9 +43,10 @@ public sealed class WarehouseLoader
         int expectedRowCount,
         string oneLakeDfsUrl,
         string stagingFileFormat,
-        CleanupConfig cleanup)
+        CleanupConfig cleanup,
+        string? logPrefix = null)
     {
-        await using var conn = await _factory.OpenAsync();
+        await using var conn = await _factory.OpenAsync(logPrefix: logPrefix);
 
         // 1) Create temp table
         var colDefs = string.Join(",\n", columns.Select(c =>
@@ -55,12 +57,12 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
 {colDefs}
 );
 ";
-        await ExecAsync(conn, createTempSql, "create temp table");
+        await ExecAsync(conn, createTempSql, "create temp table", logPrefix);
 
         // 2) COPY INTO from OneLake (CSV + gzip supported; OneLake supported as source in Fabric) :contentReference[oaicite:8]{index=8}
         var colList = string.Join(",", columns.Select(c => $"[{c.Name}]"));
         var copySql = BuildCopyIntoSql(targetSchema, tempTable, colList, oneLakeDfsUrl, stagingFileFormat);
-        var copyIntoElapsed = await ExecAsync(conn, copySql, "copy into temp table");
+        var copyIntoElapsed = await ExecAsync(conn, copySql, "copy into temp table", logPrefix);
 
         // 3) Verify rows loaded into temp table match source chunk rows
         var loadedRowCount = await GetTableRowCountAsync(conn, targetSchema, tempTable);
@@ -72,20 +74,21 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
         }
 
         _log.LogDebug(
-            "Chunk row count verified for temp table [{Schema}].[{Table}]: {RowCount} rows.",
+            "{LogPrefix}Chunk row count verified for temp table [{Schema}].[{Table}]: {RowCount} rows.",
+            Prefix(logPrefix),
             targetSchema,
             tempTable,
             loadedRowCount);
 
         // 4) MERGE into target (MERGE supported in Fabric Warehouse per official surface area) :contentReference[oaicite:9]{index=9}
         var mergeSql = MergeBuilder.BuildMergeSql(targetSchema, targetTable, tempTable, columns, primaryKey);
-        var mergeElapsed = await ExecAsync(conn, mergeSql, "merge into target");
+        var mergeElapsed = await ExecAsync(conn, mergeSql, "merge into target", logPrefix);
 
         // 5) Cleanup temp table
         if (cleanup.DropTempTables)
         {
             var dropSql = $@"DROP TABLE [{targetSchema}].[{tempTable}];";
-            await ExecAsync(conn, dropSql, "drop temp table");
+            await ExecAsync(conn, dropSql, "drop temp table", logPrefix);
         }
 
         return new WarehouseChunkMetrics(copyIntoElapsed, mergeElapsed);
@@ -99,9 +102,10 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
         string sourceKeysDfsUrl,
         string sourceKeysFileFormat,
         string? subsetWhere,
-        CleanupConfig cleanup)
+        CleanupConfig cleanup,
+        string? logPrefix = null)
     {
-        await using var conn = await _factory.OpenAsync();
+        await using var conn = await _factory.OpenAsync(logPrefix: logPrefix);
 
         var pkDefs = string.Join(",\n", primaryKeyColumns.Select(c =>
             $"[{c.Name}] {TypeMapper.SqlServerToFabricWarehouseType(c.SqlServerTypeName)} NULL"));
@@ -110,11 +114,11 @@ CREATE TABLE [{targetSchema}].[{sourceKeysTempTable}] (
 {pkDefs}
 );
 ";
-        await ExecAsync(conn, createTempSql, "create source-keys temp table");
+        await ExecAsync(conn, createTempSql, "create source-keys temp table", logPrefix);
 
         var pkColList = string.Join(",", primaryKeyColumns.Select(c => $"[{c.Name}]"));
         var copySql = BuildCopyIntoSql(targetSchema, sourceKeysTempTable, pkColList, sourceKeysDfsUrl, sourceKeysFileFormat);
-        var copyElapsed = await ExecAsync(conn, copySql, "copy source keys into temp table");
+        var copyElapsed = await ExecAsync(conn, copySql, "copy source keys into temp table", logPrefix);
 
         var pkJoin = string.Join(" AND ", primaryKeyColumns.Select(c => $"t.[{c.Name}] = s.[{c.Name}]"));
         var subsetPredicate = string.IsNullOrWhiteSpace(subsetWhere) ? "1=1" : $"({subsetWhere})";
@@ -131,12 +135,12 @@ WHERE {subsetPredicate}
   )
   AND ISNULL(t.[_sg_update_op], '') <> 'D';
 ";
-        var (softDeleteElapsed, affectedRows) = await ExecWithRowsAsync(conn, softDeleteSql, "soft delete missing rows");
+        var (softDeleteElapsed, affectedRows) = await ExecWithRowsAsync(conn, softDeleteSql, "soft delete missing rows", logPrefix);
 
         if (cleanup.DropTempTables)
         {
             var dropSql = $@"DROP TABLE [{targetSchema}].[{sourceKeysTempTable}];";
-            await ExecAsync(conn, dropSql, "drop source-keys temp table");
+            await ExecAsync(conn, dropSql, "drop source-keys temp table", logPrefix);
         }
 
         return new WarehouseDeleteMetrics(copyElapsed, softDeleteElapsed, affectedRows);
@@ -168,17 +172,18 @@ WITH (
 ";
     }
 
-    private async Task<TimeSpan> ExecAsync(SqlConnection conn, string sql, string operation)
+    private async Task<TimeSpan> ExecAsync(SqlConnection conn, string sql, string operation, string? logPrefix = null)
     {
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
-        _log.LogDebug("SQL Exec ({Operation}): {Sql}", operation, sql);
+        _log.LogDebug("{LogPrefix}SQL Exec ({Operation}) started.", Prefix(logPrefix), operation);
+        _log.LogTrace("{LogPrefix}SQL Exec ({Operation}): {Sql}", Prefix(logPrefix), operation, sql);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             await cmd.ExecuteNonQueryAsync();
             sw.Stop();
-            _log.LogDebug("Exec elapsed: {Elapsed}ms", sw.Elapsed.TotalMilliseconds);
+            _log.LogDebug("{LogPrefix}Exec elapsed: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
             return sw.Elapsed;
         }
         catch (SqlException ex)
@@ -186,29 +191,31 @@ WITH (
             sw.Stop();
             _log.LogError(
                 ex,
-                "SQL operation failed ({Operation}) after {ElapsedMs:F0}ms. Number={ErrorNumber}, State={State}, Class={Class}, ClientConnectionId={ClientConnectionId}, Sql={Sql}",
+                "{LogPrefix}SQL operation failed ({Operation}) after {ElapsedMs:F0}ms. Number={ErrorNumber}, State={State}, Class={Class}, ClientConnectionId={ClientConnectionId}",
+                Prefix(logPrefix),
                 operation,
                 sw.Elapsed.TotalMilliseconds,
                 ex.Number,
                 ex.State,
                 ex.Class,
-                ex.ClientConnectionId,
-                CompactSql(sql));
+                ex.ClientConnectionId);
+            _log.LogTrace("{LogPrefix}Failed SQL ({Operation}): {Sql}", Prefix(logPrefix), operation, CompactSql(sql));
             throw;
         }
     }
 
-    private async Task<(TimeSpan Elapsed, int Rows)> ExecWithRowsAsync(SqlConnection conn, string sql, string operation)
+    private async Task<(TimeSpan Elapsed, int Rows)> ExecWithRowsAsync(SqlConnection conn, string sql, string operation, string? logPrefix = null)
     {
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
-        _log.LogDebug("SQL ExecWithRows ({Operation}): {Sql}", operation, sql);
+        _log.LogDebug("{LogPrefix}SQL ExecWithRows ({Operation}) started.", Prefix(logPrefix), operation);
+        _log.LogTrace("{LogPrefix}SQL ExecWithRows ({Operation}): {Sql}", Prefix(logPrefix), operation, sql);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         try
         {
             var rows = await cmd.ExecuteNonQueryAsync();
             sw.Stop();
-            _log.LogDebug("Exec elapsed: {Elapsed}ms, rows={Rows}", sw.Elapsed.TotalMilliseconds, rows);
+            _log.LogDebug("{LogPrefix}Exec elapsed: {Elapsed}ms, rows={Rows}", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds, rows);
             return (sw.Elapsed, rows);
         }
         catch (SqlException ex)
@@ -216,14 +223,15 @@ WITH (
             sw.Stop();
             _log.LogError(
                 ex,
-                "SQL operation failed ({Operation}) after {ElapsedMs:F0}ms. Number={ErrorNumber}, State={State}, Class={Class}, ClientConnectionId={ClientConnectionId}, Sql={Sql}",
+                "{LogPrefix}SQL operation failed ({Operation}) after {ElapsedMs:F0}ms. Number={ErrorNumber}, State={State}, Class={Class}, ClientConnectionId={ClientConnectionId}",
+                Prefix(logPrefix),
                 operation,
                 sw.Elapsed.TotalMilliseconds,
                 ex.Number,
                 ex.State,
                 ex.Class,
-                ex.ClientConnectionId,
-                CompactSql(sql));
+                ex.ClientConnectionId);
+            _log.LogTrace("{LogPrefix}Failed SQL ({Operation}): {Sql}", Prefix(logPrefix), operation, CompactSql(sql));
             throw;
         }
     }
@@ -243,4 +251,7 @@ WITH (
         var result = await cmd.ExecuteScalarAsync();
         return Convert.ToInt32(result);
     }
+
+    private static string Prefix(string? logPrefix) =>
+        string.IsNullOrWhiteSpace(logPrefix) ? "[app] " : $"{logPrefix} ";
 }
