@@ -200,7 +200,6 @@ public static class Program
 
                 var sourceSchemaReader = new SourceSchemaReader(
                     sourceCfg.ConnectionString,
-                    envConfig.SchemaDiscovery,
                     sourceCfg.CommandTimeoutSeconds,
                     logger);
                 var sourceChunkReader = new SourceChunkReader(

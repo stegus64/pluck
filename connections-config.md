@@ -38,9 +38,6 @@ environments:
       deleteLocalTempFiles: true
       deleteStagedFiles: true
       dropTempTables: true
-
-    schemaDiscovery:
-      mode: "DescribeFirstResultSet"
 ```
 
 ## CLI Selection
@@ -156,20 +153,6 @@ Defaults:
 - `deleteLocalTempFiles: true`
 - `deleteStagedFiles: true`
 - `dropTempTables: true`
-
-### `schemaDiscovery` (optional)
-
-Controls source schema discovery strategy.
-
-```yaml
-schemaDiscovery:
-  mode: "DescribeFirstResultSet"
-```
-
-Supported values:
-
-- `DescribeFirstResultSet` (default)
-- `FmtOnly`
 
 ## Validation Notes
 

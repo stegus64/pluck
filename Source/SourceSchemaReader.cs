@@ -1,6 +1,4 @@
-using System.Data;
 using Microsoft.Data.SqlClient;
-using FabricIncrementalReplicator.Config;
 using FabricIncrementalReplicator.Util;
 
 namespace FabricIncrementalReplicator.Source;
@@ -10,37 +8,24 @@ using Microsoft.Extensions.Logging;
 public sealed class SourceSchemaReader
 {
     private readonly string _connString;
-    private readonly SchemaDiscoveryConfig _cfg;
     private readonly int _commandTimeoutSeconds;
     private readonly ILogger _log;
-    public SourceSchemaReader(string connString, SchemaDiscoveryConfig cfg, int commandTimeoutSeconds = 3600, ILogger? log = null)
+    public SourceSchemaReader(string connString, int commandTimeoutSeconds = 3600, ILogger? log = null)
     {
         _connString = connString;
-        _cfg = cfg;
         _commandTimeoutSeconds = commandTimeoutSeconds > 0 ? commandTimeoutSeconds : 3600;
         _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
     public async Task<List<SourceColumn>> DescribeQueryAsync(string sourceSql, string? logPrefix = null)
     {
-        if (string.Equals(_cfg.Mode, "FmtOnly", StringComparison.OrdinalIgnoreCase))
-        {
-            var cols = await TryDescribeByFmtOnlyAsync(sourceSql, logPrefix);
-            if (cols.Count > 0) return cols;
-        }
-
-        // Preferred
-        var described = await TryDescribeBySpDescribeFirstResultSetAsync(sourceSql, logPrefix);
+        var described = await DescribeBySpDescribeFirstResultSetAsync(sourceSql, logPrefix);
         if (described.Count > 0) return described;
 
-        // Fallback
-        var fallback = await TryDescribeByFmtOnlyAsync(sourceSql, logPrefix);
-        if (fallback.Count > 0) return fallback;
-
-        throw new Exception("Could not derive schema from sourceSql using either DescribeFirstResultSet or FMTONLY.");
+        throw new Exception("Could not derive schema from sourceSql using DescribeFirstResultSet.");
     }
 
-    private async Task<List<SourceColumn>> TryDescribeBySpDescribeFirstResultSetAsync(string sourceSql, string? logPrefix = null)
+    private async Task<List<SourceColumn>> DescribeBySpDescribeFirstResultSetAsync(string sourceSql, string? logPrefix = null)
     {
         // sp_describe_first_result_set returns metadata without executing the query.
         const string sql = @"
@@ -78,39 +63,6 @@ EXEC sp_describe_first_result_set @tsql = @q, @params = NULL, @browse_informatio
         }
 
         return result;
-    }
-
-    private async Task<List<SourceColumn>> TryDescribeByFmtOnlyAsync(string sourceSql, string? logPrefix = null)
-    {
-        // FMTONLY is deprecated, but used here because the user requested it as an approach.
-        // We execute: SET FMTONLY ON; <query>; SET FMTONLY OFF;
-        var sql = $"SET FMTONLY ON; {sourceSql}; SET FMTONLY OFF;";
-
-        await using var conn = new SqlConnection(_connString);
-        await conn.OpenAsync();
-
-        await using var cmd = new SqlCommand(sql, conn);
-        cmd.CommandTimeout = _commandTimeoutSeconds;
-        var sw = System.Diagnostics.Stopwatch.StartNew();
-        _log.LogDebug("{LogPrefix}FMTONLY describe execution started.", Prefix(logPrefix));
-        _log.LogTrace("{LogPrefix}SQL FMTONLY describe: {SqlSnippet}", Prefix(logPrefix), sourceSql.Length > 200 ? sourceSql[..200] + "..." : sourceSql);
-        await using var rdr = await cmd.ExecuteReaderAsync(CommandBehavior.SchemaOnly);
-        sw.Stop();
-        _log.LogDebug("{LogPrefix}FMTONLY execution time: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
-
-        var schema = rdr.GetSchemaTable();
-        if (schema == null) return new();
-
-        var cols = new List<SourceColumn>();
-        foreach (System.Data.DataRow row in schema.Rows)
-        {
-            var colName = row.Field<string>("ColumnName") ?? "";
-            var dataType = row.Field<Type>("DataType");
-            var providerType = row["ProviderType"];
-
-            cols.Add(SourceColumn.FromAdoSchema(colName, dataType, providerType));
-        }
-        return cols;
     }
 
     private static string Prefix(string? logPrefix) =>

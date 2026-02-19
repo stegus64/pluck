@@ -12,7 +12,6 @@ public sealed class EnvironmentConfig
     public OneLakeStagingConfig OneLakeStaging { get; set; } = new();
     public AuthConfig Auth { get; set; } = new();
     public CleanupConfig Cleanup { get; set; } = new();
-    public SchemaDiscoveryConfig SchemaDiscovery { get; set; } = new();
 }
 
 public sealed class SourceSqlConfig
@@ -54,8 +53,3 @@ public sealed class CleanupConfig
     public bool DropTempTables { get; set; } = true;
 }
 
-public sealed class SchemaDiscoveryConfig
-{
-    // "DescribeFirstResultSet" | "FmtOnly"
-    public string Mode { get; set; } = "DescribeFirstResultSet";
-}
