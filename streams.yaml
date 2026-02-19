@@ -14,4 +14,8 @@ defaults:
 streams:
   M3_MITMAS:
   M3_CFACIL:
+  # M3_ORDERS:
+  #   change_tracking:
+  #     enabled: true
+  #     sourceTable: "dbo.M3_ORDERS"
   

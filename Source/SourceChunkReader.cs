@@ -181,6 +181,133 @@ FROM src{whereSql};
         }
     }
 
+    public async Task<long?> GetChangeTrackingCurrentVersionAsync(string? logPrefix = null, CancellationToken ct = default)
+    {
+        const string sql = "SELECT CHANGE_TRACKING_CURRENT_VERSION();";
+        await using var conn = new SqlConnection(_connString);
+        await conn.OpenAsync(ct);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _commandTimeoutSeconds;
+        _log.LogDebug("{LogPrefix}GetChangeTrackingCurrentVersion execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL GetChangeTrackingCurrentVersion: {Sql}", Prefix(logPrefix), sql);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var result = await cmd.ExecuteScalarAsync(ct);
+        sw.Stop();
+        _log.LogDebug("{LogPrefix}GetChangeTrackingCurrentVersion execution time: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
+        return result is null or DBNull ? null : Convert.ToInt64(result);
+    }
+
+    public async Task<long?> GetChangeTrackingMinValidVersionAsync(string sourceTable, string? logPrefix = null, CancellationToken ct = default)
+    {
+        var sql = $"SELECT CHANGE_TRACKING_MIN_VALID_VERSION(OBJECT_ID(N'{sourceTable}'));";
+        await using var conn = new SqlConnection(_connString);
+        await conn.OpenAsync(ct);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _commandTimeoutSeconds;
+        _log.LogDebug("{LogPrefix}GetChangeTrackingMinValidVersion execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL GetChangeTrackingMinValidVersion: {Sql}", Prefix(logPrefix), sql);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        var result = await cmd.ExecuteScalarAsync(ct);
+        sw.Stop();
+        _log.LogDebug("{LogPrefix}GetChangeTrackingMinValidVersion execution time: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
+        return result is null or DBNull ? null : Convert.ToInt64(result);
+    }
+
+    public async IAsyncEnumerable<object?[]> ReadChangeTrackingUpsertsAsync(
+        string sourceSql,
+        string sourceTable,
+        List<SourceColumn> columns,
+        List<string> primaryKey,
+        long lastSyncVersionExclusive,
+        long syncToVersionInclusive,
+        string? logPrefix = null,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var selectList = string.Join(", ", columns.Select(c => $"src.[{c.Name}]"));
+        var pkJoin = string.Join(" AND ", primaryKey.Select(pk => $"src.[{pk}] = ct.[{pk}]"));
+
+        var sql = $@"
+WITH src AS (
+    {sourceSql}
+)
+SELECT {selectList}
+FROM src
+INNER JOIN CHANGETABLE(CHANGES {sourceTable}, @lastSyncVersion) AS ct
+    ON {pkJoin}
+WHERE ct.SYS_CHANGE_OPERATION IN ('I', 'U')
+  AND ct.SYS_CHANGE_VERSION <= @syncToVersion;
+";
+
+        await using var conn = new SqlConnection(_connString);
+        await conn.OpenAsync(ct);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _commandTimeoutSeconds;
+        cmd.Parameters.AddWithValue("@lastSyncVersion", lastSyncVersionExclusive);
+        cmd.Parameters.AddWithValue("@syncToVersion", syncToVersionInclusive);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("{LogPrefix}ReadChangeTrackingUpserts execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL ReadChangeTrackingUpserts: {Sql}", Prefix(logPrefix), sql);
+        _log.LogTrace("{LogPrefix}SQL ReadChangeTrackingUpserts Params: {Params}", Prefix(logPrefix), SqlLogFormatter.FormatParameters(cmd.Parameters));
+        await using var rdr = await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess, ct);
+        sw.Stop();
+        _log.LogDebug("{LogPrefix}ReadChangeTrackingUpserts execution time: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
+
+        while (await rdr.ReadAsync(ct))
+        {
+            var values = new object?[columns.Count];
+            for (int i = 0; i < columns.Count; i++)
+                values[i] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+
+            yield return values;
+        }
+    }
+
+    public async IAsyncEnumerable<object?[]> ReadChangeTrackingDeletedKeysAsync(
+        string sourceTable,
+        List<string> primaryKey,
+        long lastSyncVersionExclusive,
+        long syncToVersionInclusive,
+        string? logPrefix = null,
+        [EnumeratorCancellation] CancellationToken ct = default)
+    {
+        var selectList = string.Join(", ", primaryKey.Select(pk => $"ct.[{pk}]"));
+        var sql = $@"
+SELECT {selectList}
+FROM CHANGETABLE(CHANGES {sourceTable}, @lastSyncVersion) AS ct
+WHERE ct.SYS_CHANGE_OPERATION = 'D'
+  AND ct.SYS_CHANGE_VERSION <= @syncToVersion;
+";
+
+        await using var conn = new SqlConnection(_connString);
+        await conn.OpenAsync(ct);
+
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _commandTimeoutSeconds;
+        cmd.Parameters.AddWithValue("@lastSyncVersion", lastSyncVersionExclusive);
+        cmd.Parameters.AddWithValue("@syncToVersion", syncToVersionInclusive);
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("{LogPrefix}ReadChangeTrackingDeletedKeys execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL ReadChangeTrackingDeletedKeys: {Sql}", Prefix(logPrefix), sql);
+        _log.LogTrace("{LogPrefix}SQL ReadChangeTrackingDeletedKeys Params: {Params}", Prefix(logPrefix), SqlLogFormatter.FormatParameters(cmd.Parameters));
+        await using var rdr = await cmd.ExecuteReaderAsync(System.Data.CommandBehavior.SequentialAccess, ct);
+        sw.Stop();
+        _log.LogDebug("{LogPrefix}ReadChangeTrackingDeletedKeys execution time: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
+
+        while (await rdr.ReadAsync(ct))
+        {
+            var values = new object?[primaryKey.Count];
+            for (int i = 0; i < primaryKey.Count; i++)
+                values[i] = rdr.IsDBNull(i) ? null : rdr.GetValue(i);
+
+            yield return values;
+        }
+    }
+
     private static string Prefix(string? logPrefix) =>
         string.IsNullOrWhiteSpace(logPrefix) ? "[app] " : $"{logPrefix} ";
 }

@@ -1,4 +1,5 @@
 using YamlDotNet.Serialization;
+using System.Text.RegularExpressions;
 
 namespace Pluck.Config;
 
@@ -48,6 +49,8 @@ public sealed class StreamConfig
     public string? StagingFileFormat { get; set; }
     [YamlMember(Alias = "delete_detection", ApplyNamingConventions = false)]
     public DeleteDetectionConfig? DeleteDetection { get; set; }
+    [YamlMember(Alias = "change_tracking", ApplyNamingConventions = false)]
+    public ChangeTrackingConfig? ChangeTracking { get; set; }
 
     public static StreamConfig Merge(StreamConfig defaults, StreamConfig? streamOverride, string streamName)
     {
@@ -62,7 +65,8 @@ public sealed class StreamConfig
             UpdateKey = streamOverride?.UpdateKey ?? defaults.UpdateKey,
             ChunkSize = streamOverride?.ChunkSize ?? defaults.ChunkSize,
             StagingFileFormat = streamOverride?.StagingFileFormat ?? defaults.StagingFileFormat,
-            DeleteDetection = DeleteDetectionConfig.Merge(defaults.DeleteDetection, streamOverride?.DeleteDetection)
+            DeleteDetection = DeleteDetectionConfig.Merge(defaults.DeleteDetection, streamOverride?.DeleteDetection),
+            ChangeTracking = ChangeTrackingConfig.Merge(defaults.ChangeTracking, streamOverride?.ChangeTracking)
         };
 
         merged.SourceSql = ApplyToken(merged.SourceSql, streamName);
@@ -73,6 +77,8 @@ public sealed class StreamConfig
         merged.StagingFileFormat = ApplyToken(merged.StagingFileFormat, streamName);
         if (merged.DeleteDetection is not null)
             merged.DeleteDetection.Where = ApplyToken(merged.DeleteDetection.Where, streamName);
+        if (merged.ChangeTracking is not null)
+            merged.ChangeTracking.SourceTable = ApplyToken(merged.ChangeTracking.SourceTable, streamName);
 
         if (merged.PrimaryKey is not null)
             merged.PrimaryKey = merged.PrimaryKey.Select(k => ApplyToken(k, streamName) ?? k).ToList();
@@ -109,7 +115,8 @@ public sealed class StreamConfig
             UpdateKey = UpdateKey,
             ChunkSize = chunkSize,
             StagingFileFormat = string.IsNullOrWhiteSpace(StagingFileFormat) ? "csv.gz" : StagingFileFormat,
-            DeleteDetection = DeleteDetectionConfig.Resolve(DeleteDetection, streamName)
+            DeleteDetection = DeleteDetectionConfig.Resolve(DeleteDetection, streamName),
+            ChangeTracking = ChangeTrackingConfig.Resolve(ChangeTracking, streamName)
         };
     }
 
@@ -135,6 +142,7 @@ public sealed class ResolvedStreamConfig
     public string? ChunkSize { get; set; }
     public string StagingFileFormat { get; set; } = "csv.gz";
     public DeleteDetectionConfig DeleteDetection { get; set; } = new() { Type = "none" };
+    public ChangeTrackingConfig ChangeTracking { get; set; } = new() { Enabled = false };
 }
 
 public sealed class DeleteDetectionConfig
@@ -167,6 +175,42 @@ public sealed class DeleteDetectionConfig
         {
             Type = t,
             Where = string.IsNullOrWhiteSpace(cfg.Where) ? null : cfg.Where
+        };
+    }
+}
+
+public sealed class ChangeTrackingConfig
+{
+    public bool? Enabled { get; set; }
+    public string? SourceTable { get; set; }
+
+    public static ChangeTrackingConfig? Merge(ChangeTrackingConfig? defaults, ChangeTrackingConfig? streamOverride)
+    {
+        if (defaults is null && streamOverride is null)
+            return null;
+
+        return new ChangeTrackingConfig
+        {
+            Enabled = streamOverride?.Enabled ?? defaults?.Enabled,
+            SourceTable = streamOverride?.SourceTable ?? defaults?.SourceTable
+        };
+    }
+
+    public static ChangeTrackingConfig Resolve(ChangeTrackingConfig? cfg, string streamName)
+    {
+        if (cfg is null || cfg.Enabled != true)
+            return new ChangeTrackingConfig { Enabled = false };
+
+        if (string.IsNullOrWhiteSpace(cfg.SourceTable))
+            throw new Exception($"Missing required stream setting 'change_tracking.sourceTable' for stream '{streamName}' when change tracking is enabled.");
+        var sourceTable = cfg.SourceTable.Trim();
+        if (!Regex.IsMatch(sourceTable, @"^[\[\]\w\.]+$"))
+            throw new Exception($"Invalid stream setting 'change_tracking.sourceTable' for stream '{streamName}'. Only simple one- to three-part identifiers are supported.");
+
+        return new ChangeTrackingConfig
+        {
+            Enabled = true,
+            SourceTable = sourceTable
         };
     }
 }

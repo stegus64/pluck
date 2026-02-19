@@ -7,6 +7,7 @@ Pluck is a .NET 8 CLI for incremental replication from SQL Server sources into M
 - Reads stream definitions from `streams.yaml`
 - Reads environment and connection settings from `connections.yaml`
 - Pulls source data in update-key chunks
+- Supports per-stream SQL Server Change Tracking mode for changed/deleted rows
 - Writes chunk files (`csv`, `csv.gz`, or `parquet`) locally and uploads to OneLake
 - Loads into Fabric Warehouse with `COPY INTO` + merge/upsert
 - Optionally runs delete detection (`delete_detection.type: subset`) when `--delete_detection` is enabled
@@ -29,6 +30,8 @@ Detailed config references:
 
 - `connections-config.md`
 - `streams-config.md`
+
+For automatic changed/deleted row detection, configure per-stream `change_tracking.enabled: true` with `change_tracking.sourceTable` in `streams.yaml`.
 
 ## Build
 

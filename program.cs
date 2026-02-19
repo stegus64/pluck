@@ -327,6 +327,187 @@ public static class Program
                     logPrefix: streamPrefix
                 );
 
+                var changeTrackingEnabled = stream.ChangeTracking.Enabled == true;
+                long? ctVersionToPersistAfterStandard = null;
+                if (changeTrackingEnabled)
+                {
+                    var ctSourceTable = stream.ChangeTracking.SourceTable!;
+                    var ctSyncToVersion = await sourceChunkReader.GetChangeTrackingCurrentVersionAsync(streamPrefix);
+                    if (ctSyncToVersion is null)
+                        throw new Exception($"Stream '{stream.Name}' is configured for change tracking, but CHANGE_TRACKING_CURRENT_VERSION() returned NULL.");
+
+                    var ctStreamState = await loaderTarget.GetStreamStateAsync(stream.Name, streamPrefix);
+                    if (ctStreamState?.ChangeTrackingVersion is long ctLastSyncVersion)
+                    {
+                        var ctMinValidVersion = await sourceChunkReader.GetChangeTrackingMinValidVersionAsync(ctSourceTable, streamPrefix);
+                        if (ctMinValidVersion is null)
+                            throw new Exception(
+                                $"Stream '{stream.Name}' has change_tracking enabled but source table '{ctSourceTable}' is not valid for CHANGE_TRACKING_MIN_VALID_VERSION. " +
+                                "Verify that SQL Server Change Tracking is enabled for the database and source table.");
+
+                        if (ctLastSyncVersion < ctMinValidVersion.Value)
+                        {
+                            throw new Exception(
+                                $"Stream '{stream.Name}' has stale change tracking state: lastSyncVersion={ctLastSyncVersion}, minValidVersion={ctMinValidVersion.Value}. " +
+                                "A re-initialization run is required (remove stream state row and run a full/non-CT sync once).");
+                        }
+
+                        logger.LogInformation(
+                            "{LogPrefix} Change tracking mode enabled. sourceTable={SourceTable}, fromVersion={FromVersion}, toVersion={ToVersion}, minValidVersion={MinValidVersion}",
+                            streamPrefix,
+                            ctSourceTable,
+                            ctLastSyncVersion,
+                            ctSyncToVersion.Value,
+                            ctMinValidVersion.Value);
+
+                        // Upserts from CHANGETABLE (I/U) joined to current source rows.
+                        var ext = stagingFileFormat == "parquet" ? "parquet" : (stagingFileFormat == "csv" ? "csv" : "csv.gz");
+                        var upsertRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
+                        var upsertFileName = $"{stream.Name}/run={upsertRunId}/ct-upserts.{ext}";
+                        var upsertLocalPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"ct-upserts.{ext}");
+                        Directory.CreateDirectory(Path.GetDirectoryName(upsertLocalPath)!);
+
+                        var upsertRows = sourceChunkReader.ReadChangeTrackingUpsertsAsync(
+                            stream.SourceSql,
+                            ctSourceTable,
+                            sourceColumns,
+                            stream.PrimaryKey,
+                            ctLastSyncVersion,
+                            ctSyncToVersion.Value,
+                            streamPrefix);
+                        var upsertWriteSw = System.Diagnostics.Stopwatch.StartNew();
+                        var upsertWrite = stagingFileFormat == "parquet"
+                            ? await parquetWriter.WriteParquetAsync(upsertLocalPath, sourceColumns, upsertRows)
+                            : stagingFileFormat == "csv"
+                                ? await csvWriter.WriteCsvAsync(upsertLocalPath, sourceColumns, upsertRows)
+                                : await csvWriter.WriteCsvGzAsync(upsertLocalPath, sourceColumns, upsertRows);
+                        upsertWriteSw.Stop();
+
+                        if (upsertWrite.RowCount > 0)
+                        {
+                            var upsertUploadSw = System.Diagnostics.Stopwatch.StartNew();
+                            var upsertsDfsUrl = await uploader.UploadAsync(upsertLocalPath, upsertFileName, streamPrefix);
+                            upsertUploadSw.Stop();
+
+                            var upsertTempTable = $"__tmp_ct_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
+                            var upsertMetrics = await loaderTarget.LoadAndMergeAsync(
+                                targetSchema: targetSchema,
+                                targetTable: targetTable,
+                                tempTable: upsertTempTable,
+                                columns: sourceColumns,
+                                primaryKey: stream.PrimaryKey,
+                                expectedRowCount: upsertWrite.RowCount,
+                                oneLakeDfsUrl: upsertsDfsUrl,
+                                stagingFileFormat: stagingFileFormat,
+                                cleanup: envConfig.Cleanup,
+                                logPrefix: streamPrefix
+                            );
+
+                            logger.LogInformation(
+                                "{LogPrefix} Change tracking upserts: rows={RowCount}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}",
+                                streamPrefix,
+                                upsertWrite.RowCount,
+                                upsertWriteSw.Elapsed.TotalMilliseconds,
+                                upsertUploadSw.Elapsed.TotalMilliseconds,
+                                upsertMetrics.CopyIntoElapsed.TotalMilliseconds,
+                                upsertMetrics.MergeElapsed.TotalMilliseconds);
+
+                            if (envConfig.Cleanup.DeleteStagedFiles)
+                                await uploader.TryDeleteAsync(upsertFileName, streamPrefix);
+                        }
+                        else
+                        {
+                            logger.LogInformation("{LogPrefix} Change tracking upserts: no changed insert/update rows.", streamPrefix);
+                        }
+
+                        if (envConfig.Cleanup.DeleteLocalTempFiles)
+                            TryDeleteLocalTempFileAndDirectory(upsertLocalPath, logger, streamPrefix);
+
+                        // Deletes from CHANGETABLE (D), applied as target soft deletes by key.
+                        var pkColumns = stream.PrimaryKey
+                            .Select(pk => sourceColumns.Single(c => c.Name.Equals(pk, StringComparison.OrdinalIgnoreCase)))
+                            .ToList();
+                        var deleteRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
+                        var deleteKeysFileName = $"{stream.Name}/run={deleteRunId}/ct-delete-keys.csv.gz";
+                        var deleteKeysLocalPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), "ct-delete-keys.csv.gz");
+                        Directory.CreateDirectory(Path.GetDirectoryName(deleteKeysLocalPath)!);
+
+                        var deleteKeysRows = sourceChunkReader.ReadChangeTrackingDeletedKeysAsync(
+                            ctSourceTable,
+                            stream.PrimaryKey,
+                            ctLastSyncVersion,
+                            ctSyncToVersion.Value,
+                            streamPrefix);
+                        var deleteWriteSw = System.Diagnostics.Stopwatch.StartNew();
+                        var deleteKeyWrite = await csvWriter.WriteCsvGzAsync(deleteKeysLocalPath, pkColumns, deleteKeysRows);
+                        deleteWriteSw.Stop();
+
+                        if (deleteKeyWrite.RowCount > 0)
+                        {
+                            var deleteUploadSw = System.Diagnostics.Stopwatch.StartNew();
+                            var deleteKeysDfsUrl = await uploader.UploadAsync(deleteKeysLocalPath, deleteKeysFileName, streamPrefix);
+                            deleteUploadSw.Stop();
+
+                            var deleteKeysTempTable = $"__tmp_ct_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
+                            var deleteMetrics = await loaderTarget.SoftDeleteByKeysAsync(
+                                targetSchema: targetSchema,
+                                targetTable: targetTable,
+                                sourceKeysTempTable: deleteKeysTempTable,
+                                primaryKeyColumns: pkColumns,
+                                expectedSourceKeyRowCount: deleteKeyWrite.RowCount,
+                                sourceKeysDfsUrl: deleteKeysDfsUrl,
+                                sourceKeysFileFormat: "csv.gz",
+                                cleanup: envConfig.Cleanup,
+                                logPrefix: streamPrefix);
+
+                            logger.LogInformation(
+                                "{LogPrefix} Change tracking deletes: sourceDeleteKeys={SourceDeleteKeys}, keyWriteMs={KeyWriteMs:F0}, keyUploadMs={KeyUploadMs:F0}, keyCopyMs={KeyCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
+                                streamPrefix,
+                                deleteKeyWrite.RowCount,
+                                deleteWriteSw.Elapsed.TotalMilliseconds,
+                                deleteUploadSw.Elapsed.TotalMilliseconds,
+                                deleteMetrics.CopyIntoElapsed.TotalMilliseconds,
+                                deleteMetrics.SoftDeleteElapsed.TotalMilliseconds,
+                                deleteMetrics.AffectedRows);
+
+                            if (envConfig.Cleanup.DeleteStagedFiles)
+                                await uploader.TryDeleteAsync(deleteKeysFileName, streamPrefix);
+                        }
+                        else
+                        {
+                            logger.LogInformation("{LogPrefix} Change tracking deletes: no deleted rows.", streamPrefix);
+                        }
+
+                        if (envConfig.Cleanup.DeleteLocalTempFiles)
+                            TryDeleteLocalTempFileAndDirectory(deleteKeysLocalPath, logger, streamPrefix);
+
+                        await loaderTarget.UpsertStreamChangeTrackingVersionAsync(stream.Name, ctSyncToVersion.Value, streamPrefix);
+                        logger.LogInformation(
+                            "{LogPrefix} Change tracking stream state updated: stream={StreamName}, lastSyncVersion={Version}",
+                            appPrefix,
+                            stream.Name,
+                            ctSyncToVersion.Value);
+
+                        if (runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
+                        {
+                            logger.LogInformation(
+                                "{LogPrefix} Delete detection configured but skipped because change_tracking is enabled.",
+                                streamPrefix);
+                        }
+
+                        logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
+                        return;
+                    }
+
+                    logger.LogWarning(
+                        "{LogPrefix} Change tracking enabled but no prior stream state exists. Falling back to standard sync for this run and initializing change tracking version afterward. stream={StreamName}, sourceTable={SourceTable}, initVersion={InitVersion}",
+                        appPrefix,
+                        stream.Name,
+                        ctSourceTable,
+                        ctSyncToVersion.Value);
+                    ctVersionToPersistAfterStandard = ctSyncToVersion.Value;
+                }
+
                 // 3) Read watermark from target
                 object? targetMax = await loaderTarget.GetMaxUpdateKeyAsync(targetSchema, targetTable, stream.UpdateKey, streamPrefix);
                 logger.LogInformation("{LogPrefix} Target watermark (max {UpdateKey}) = {TargetMax}", streamPrefix, stream.UpdateKey, FormatLogValue(targetMax));
@@ -583,6 +764,16 @@ public static class Program
                         streamPrefix);
                 }
 
+                if (ctVersionToPersistAfterStandard.HasValue)
+                {
+                    await loaderTarget.UpsertStreamChangeTrackingVersionAsync(stream.Name, ctVersionToPersistAfterStandard.Value, streamPrefix);
+                    logger.LogInformation(
+                        "{LogPrefix} Change tracking stream state initialized: stream={StreamName}, lastSyncVersion={Version}",
+                        appPrefix,
+                        stream.Name,
+                        ctVersionToPersistAfterStandard.Value);
+                }
+
                 logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
             }
 
@@ -590,7 +781,7 @@ public static class Program
             {
                 var streamPrefix = $"[stream={stream.Name}]";
                 logger.LogDebug(
-                    "{LogPrefix} Resolved stream config: sourceConnection={SourceConnection}; sourceSql={SourceSql}; targetSchema={TargetSchema}; targetTable={TargetTable}; primaryKey=[{PrimaryKey}]; excludeColumns=[{ExcludeColumns}]; updateKey={UpdateKey}; chunkSize={ChunkSize}; stagingFileFormat={StagingFileFormat}; deleteDetectionType={DeleteDetectionType}; deleteDetectionWhere={DeleteDetectionWhere}",
+                    "{LogPrefix} Resolved stream config: sourceConnection={SourceConnection}; sourceSql={SourceSql}; targetSchema={TargetSchema}; targetTable={TargetTable}; primaryKey=[{PrimaryKey}]; excludeColumns=[{ExcludeColumns}]; updateKey={UpdateKey}; chunkSize={ChunkSize}; stagingFileFormat={StagingFileFormat}; deleteDetectionType={DeleteDetectionType}; deleteDetectionWhere={DeleteDetectionWhere}; changeTrackingEnabled={ChangeTrackingEnabled}; changeTrackingSourceTable={ChangeTrackingSourceTable}",
                     streamPrefix,
                     stream.SourceConnection,
                     stream.SourceSql,
@@ -602,7 +793,9 @@ public static class Program
                     stream.ChunkSize ?? "<none>",
                     stream.StagingFileFormat,
                     stream.DeleteDetection.Type,
-                    string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where);
+                    string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where,
+                    stream.ChangeTracking.Enabled == true,
+                    stream.ChangeTracking.SourceTable ?? "<none>");
             }
         }
         catch (SqlException ex)

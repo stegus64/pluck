@@ -198,7 +198,38 @@ Behavior:
 - Any target row in the selected subset with no matching source key is soft-deleted.
 - Soft delete means:
   - `_pluck_update_op = 'D'`
-  - `_pluck_update_datetime = SYSUTCDATETIME()`
+- `_pluck_update_datetime = SYSUTCDATETIME()`
+
+### `change_tracking` (optional)
+
+Enables SQL Server Change Tracking based replication for changed and deleted rows.
+
+```yaml
+change_tracking:
+  enabled: true
+  sourceTable: "dbo.M3_ORDERS"
+```
+
+Fields:
+
+- `enabled`:
+  - `false` (default): use standard update-key watermark processing.
+  - `true`: use SQL Server Change Tracking for this stream.
+- `sourceTable` (required when `enabled: true`):
+  - One- to three-part table identifier used by `CHANGETABLE(CHANGES ...)`.
+  - Example: `dbo.M3_ORDERS`
+
+Behavior:
+
+- When enabled and stream state exists:
+  - Upserts are read from change tracking `I`/`U` rows and merged to target.
+  - Deletes are read from change tracking `D` rows and soft-deleted in target.
+- Stream state is stored in warehouse table `dbo.__pluck_stream_state` as last synced CT version.
+- First run with `change_tracking.enabled: true` and no prior stream state:
+  - falls back to standard sync for that run
+  - then initializes CT stream state for the next run.
+- If stored CT version is older than `CHANGE_TRACKING_MIN_VALID_VERSION`, the stream fails and requires re-initialization.
+- When change tracking is enabled, `delete_detection` is skipped.
 
 ## Full Example
 
@@ -228,9 +259,9 @@ streams:
     stagingFileFormat: "csv"
 
   M3_ORDERS:
-    delete_detection:
-      type: "subset"
-      where: "created_date > dateadd(year, -1, getdate())"
+    change_tracking:
+      enabled: true
+      sourceTable: "dbo.M3_ORDERS"
 ```
 
 ## Target Metadata Columns

@@ -8,6 +8,7 @@ namespace Pluck.Target;
 
 public sealed record WarehouseChunkMetrics(TimeSpan CopyIntoElapsed, TimeSpan MergeElapsed);
 public sealed record WarehouseDeleteMetrics(TimeSpan CopyIntoElapsed, TimeSpan SoftDeleteElapsed, int AffectedRows);
+public sealed record WarehouseStreamState(string StreamName, long? ChangeTrackingVersion);
 
 public sealed class WarehouseLoader
 {
@@ -32,6 +33,57 @@ public sealed class WarehouseLoader
         sw0.Stop();
         _log.LogDebug("{LogPrefix}GetMaxUpdateKey elapsed: {Elapsed}ms", Prefix(logPrefix), sw0.Elapsed.TotalMilliseconds);
         return v is DBNull ? null : v;
+    }
+
+    public async Task<WarehouseStreamState?> GetStreamStateAsync(string streamName, string? logPrefix = null)
+    {
+        await EnsureStreamStateTableAsync(logPrefix);
+        await using var conn = await _factory.OpenAsync(logPrefix: logPrefix);
+        var sql = @"
+SELECT [stream_name], [ct_last_sync_version]
+FROM [dbo].[__pluck_stream_state]
+WHERE [stream_name] = @streamName;
+";
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
+        cmd.Parameters.AddWithValue("@streamName", streamName);
+        _log.LogDebug("{LogPrefix}GetStreamState execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL GetStreamState: {Sql}", Prefix(logPrefix), sql);
+        _log.LogTrace("{LogPrefix}SQL GetStreamState Params: {Params}", Prefix(logPrefix), SqlLogFormatter.FormatParameters(cmd.Parameters));
+
+        await using var rdr = await cmd.ExecuteReaderAsync();
+        if (!await rdr.ReadAsync())
+            return null;
+
+        return new WarehouseStreamState(
+            StreamName: rdr.GetString(0),
+            ChangeTrackingVersion: rdr.IsDBNull(1) ? null : rdr.GetInt64(1));
+    }
+
+    public async Task UpsertStreamChangeTrackingVersionAsync(string streamName, long ctLastSyncVersion, string? logPrefix = null)
+    {
+        await EnsureStreamStateTableAsync(logPrefix);
+        await using var conn = await _factory.OpenAsync(logPrefix: logPrefix);
+        var sql = @"
+MERGE [dbo].[__pluck_stream_state] AS t
+USING (SELECT @streamName AS stream_name, @ctLastSyncVersion AS ct_last_sync_version) AS s
+ON t.[stream_name] = s.[stream_name]
+WHEN MATCHED THEN
+    UPDATE SET
+        t.[ct_last_sync_version] = s.[ct_last_sync_version],
+        t.[updated_utc] = SYSUTCDATETIME()
+WHEN NOT MATCHED THEN
+    INSERT ([stream_name], [ct_last_sync_version], [updated_utc])
+    VALUES (s.[stream_name], s.[ct_last_sync_version], SYSUTCDATETIME());
+";
+        await using var cmd = new SqlCommand(sql, conn);
+        cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
+        cmd.Parameters.AddWithValue("@streamName", streamName);
+        cmd.Parameters.AddWithValue("@ctLastSyncVersion", ctLastSyncVersion);
+        _log.LogDebug("{LogPrefix}UpsertStreamChangeTrackingVersion execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL UpsertStreamChangeTrackingVersion: {Sql}", Prefix(logPrefix), sql);
+        _log.LogTrace("{LogPrefix}SQL UpsertStreamChangeTrackingVersion Params: {Params}", Prefix(logPrefix), SqlLogFormatter.FormatParameters(cmd.Parameters));
+        await cmd.ExecuteNonQueryAsync();
     }
 
     public async Task<WarehouseChunkMetrics> LoadAndMergeAsync(
@@ -160,6 +212,60 @@ WHERE {subsetPredicate}
         return new WarehouseDeleteMetrics(copyElapsed, softDeleteElapsed, affectedRows);
     }
 
+    public async Task<WarehouseDeleteMetrics> SoftDeleteByKeysAsync(
+        string targetSchema,
+        string targetTable,
+        string sourceKeysTempTable,
+        List<SourceColumn> primaryKeyColumns,
+        int expectedSourceKeyRowCount,
+        string sourceKeysDfsUrl,
+        string sourceKeysFileFormat,
+        CleanupConfig cleanup,
+        string? logPrefix = null)
+    {
+        await using var conn = await _factory.OpenAsync(logPrefix: logPrefix);
+
+        var pkDefs = string.Join(",\n", primaryKeyColumns.Select(c =>
+            $"[{c.Name}] {TypeMapper.SqlServerToFabricWarehouseType(c.SqlServerTypeName)} NULL"));
+        var createTempSql = $@"
+CREATE TABLE [{targetSchema}].[{sourceKeysTempTable}] (
+{pkDefs}
+);
+";
+        await ExecAsync(conn, createTempSql, "create ct-delete-keys temp table", logPrefix);
+
+        var pkColList = string.Join(",", primaryKeyColumns.Select(c => $"[{c.Name}]"));
+        var copySql = BuildCopyIntoSql(targetSchema, sourceKeysTempTable, pkColList, sourceKeysDfsUrl, sourceKeysFileFormat);
+        var copyElapsed = await ExecAsync(conn, copySql, "copy ct-delete-keys into temp table", logPrefix);
+        var loadedSourceKeyRowCount = await GetTableRowCountAsync(conn, targetSchema, sourceKeysTempTable);
+        if (loadedSourceKeyRowCount != expectedSourceKeyRowCount)
+        {
+            throw new Exception(
+                $"CT delete-key row count mismatch for [{targetSchema}].[{sourceKeysTempTable}]. " +
+                $"Source keys={expectedSourceKeyRowCount}, temp table rows={loadedSourceKeyRowCount}.");
+        }
+
+        var pkJoin = string.Join(" AND ", primaryKeyColumns.Select(c => $"t.[{c.Name}] = s.[{c.Name}]"));
+        var softDeleteSql = $@"
+UPDATE t
+SET t.[_pluck_update_datetime] = SYSUTCDATETIME(),
+    t.[_pluck_update_op] = 'D'
+FROM [{targetSchema}].[{targetTable}] AS t
+INNER JOIN [{targetSchema}].[{sourceKeysTempTable}] AS s
+    ON {pkJoin}
+WHERE ISNULL(t.[_pluck_update_op], '') <> 'D';
+";
+        var (softDeleteElapsed, affectedRows) = await ExecWithRowsAsync(conn, softDeleteSql, "soft delete ct rows", logPrefix);
+
+        if (cleanup.DropTempTables)
+        {
+            var dropSql = $@"DROP TABLE [{targetSchema}].[{sourceKeysTempTable}];";
+            await ExecAsync(conn, dropSql, "drop ct-delete-keys temp table", logPrefix);
+        }
+
+        return new WarehouseDeleteMetrics(copyElapsed, softDeleteElapsed, affectedRows);
+    }
+
     private static string BuildCopyIntoSql(
         string targetSchema,
         string tempTable,
@@ -264,6 +370,23 @@ WITH (
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
         var result = await cmd.ExecuteScalarAsync();
         return Convert.ToInt32(result);
+    }
+
+    private async Task EnsureStreamStateTableAsync(string? logPrefix = null)
+    {
+        await using var conn = await _factory.OpenAsync(logPrefix: logPrefix);
+        var sql = @"
+IF OBJECT_ID(N'dbo.__pluck_stream_state', N'U') IS NULL
+BEGIN
+    CREATE TABLE [dbo].[__pluck_stream_state] (
+        [stream_name] nvarchar(256) NOT NULL,
+        [ct_last_sync_version] bigint NULL,
+        [updated_utc] datetime2(0) NOT NULL,
+        CONSTRAINT [PK___pluck_stream_state] PRIMARY KEY ([stream_name])
+    );
+END;
+";
+        await ExecAsync(conn, sql, "ensure stream state table", logPrefix);
     }
 
     private static string Prefix(string? logPrefix) =>
