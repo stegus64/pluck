@@ -15,7 +15,14 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
-        if (args.Any(a => a.Equals("--help", StringComparison.OrdinalIgnoreCase) || a.Equals("-h", StringComparison.OrdinalIgnoreCase)))
+        if (!TryParseArgs(args, out var parsedArgs, out var parseError))
+        {
+            Console.Error.WriteLine(parseError);
+            Console.Error.WriteLine("Use --help to see valid options.");
+            return 1;
+        }
+
+        if (parsedArgs.Help)
         {
             PrintHelp();
             return 0;
@@ -23,13 +30,13 @@ public static class Program
 
         const string appPrefix = "[app]";
         // Configure logging
-        var traceFlag = args.Any(a => a.Equals("--trace", StringComparison.OrdinalIgnoreCase));
-        var debugFlag = args.Any(a => a.Equals("--debug", StringComparison.OrdinalIgnoreCase));
+        var traceFlag = parsedArgs.Trace;
+        var debugFlag = parsedArgs.Debug;
         var logLevelArg = traceFlag
             ? "TRACE"
             : debugFlag
             ? "DEBUG"
-            : (GetArg(args, "--log-level") ?? "INFO");
+            : (parsedArgs.LogLevel ?? "INFO");
         var minLogLevel = logLevelArg.ToUpperInvariant() switch
         {
             "TRACE" => Microsoft.Extensions.Logging.LogLevel.Trace,
@@ -48,10 +55,10 @@ public static class Program
 
         try
         {
-            var env = GetArg(args, "--env") ?? "dev";
-            var connectionsPath = GetArg(args, "--connections-file") ?? "connections.yaml";
-            var streamsPathArg = GetArg(args, "--streams-file");
-            var streamsFilterArg = GetArg(args, "--streams");
+            var env = parsedArgs.Env ?? "dev";
+            var connectionsPath = parsedArgs.ConnectionsFile ?? "connections.yaml";
+            var streamsPathArg = parsedArgs.StreamsFile;
+            var streamsFilterArg = parsedArgs.Streams;
             var streamsPath = streamsPathArg ?? "streams.yaml";
 
             var loader = new YamlLoader();
@@ -64,8 +71,8 @@ public static class Program
             var tokenProvider = new TokenProvider(envConfig.Auth);
 
 
-            var testConnectionsFlag = args.Any(a => a.Equals("--test-connections", StringComparison.OrdinalIgnoreCase));
-            var runDeleteDetection = args.Any(a => a.Equals("--delete_detection", StringComparison.OrdinalIgnoreCase));
+            var testConnectionsFlag = parsedArgs.TestConnections;
+            var runDeleteDetection = parsedArgs.DeleteDetection;
 
             var sourceSchemaReader = new SourceSchemaReader(
                 envConfig.SourceSql.ConnectionString,
@@ -523,14 +530,128 @@ public static class Program
         }
     }
 
-    private static string? GetArg(string[] args, string name)
+    private static bool TryParseArgs(string[] args, out ParsedArgs parsed, out string? error)
     {
+        parsed = new ParsedArgs();
+        error = null;
+
+        var valueOptions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "--env",
+            "--connections-file",
+            "--streams-file",
+            "--streams",
+            "--log-level"
+        };
+        var flagOptions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            "--help",
+            "-h",
+            "--test-connections",
+            "--delete_detection",
+            "--debug",
+            "--trace"
+        };
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
         for (int i = 0; i < args.Length; i++)
         {
-            if (args[i].Equals(name, StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
-                return args[i + 1];
+            var token = args[i];
+            if (!token.StartsWith("-", StringComparison.Ordinal))
+            {
+                error = $"Unexpected positional argument '{token}'.";
+                return false;
+            }
+
+            string option;
+            string? valueInline = null;
+            var eqIdx = token.IndexOf('=');
+            if (eqIdx > 0)
+            {
+                option = token[..eqIdx];
+                valueInline = token[(eqIdx + 1)..];
+            }
+            else
+            {
+                option = token;
+            }
+
+            if (!valueOptions.Contains(option) && !flagOptions.Contains(option))
+            {
+                error = $"Unknown parameter '{option}'.";
+                return false;
+            }
+
+            if (seen.Contains(option))
+            {
+                error = $"Parameter '{option}' was specified more than once.";
+                return false;
+            }
+            seen.Add(option);
+
+            if (flagOptions.Contains(option))
+            {
+                if (valueInline is not null)
+                {
+                    error = $"Parameter '{option}' does not accept a value.";
+                    return false;
+                }
+
+                if (option.Equals("--help", StringComparison.OrdinalIgnoreCase) || option.Equals("-h", StringComparison.OrdinalIgnoreCase))
+                    parsed.Help = true;
+                else if (option.Equals("--test-connections", StringComparison.OrdinalIgnoreCase))
+                    parsed.TestConnections = true;
+                else if (option.Equals("--delete_detection", StringComparison.OrdinalIgnoreCase))
+                    parsed.DeleteDetection = true;
+                else if (option.Equals("--debug", StringComparison.OrdinalIgnoreCase))
+                    parsed.Debug = true;
+                else if (option.Equals("--trace", StringComparison.OrdinalIgnoreCase))
+                    parsed.Trace = true;
+
+                continue;
+            }
+
+            string value;
+            if (valueInline is not null)
+            {
+                value = valueInline;
+            }
+            else
+            {
+                if (i + 1 >= args.Length)
+                {
+                    error = $"Parameter '{option}' requires a value.";
+                    return false;
+                }
+
+                var next = args[++i];
+                if (next.StartsWith("-", StringComparison.Ordinal))
+                {
+                    error = $"Parameter '{option}' requires a value.";
+                    return false;
+                }
+                value = next;
+            }
+
+            if (string.IsNullOrWhiteSpace(value))
+            {
+                error = $"Parameter '{option}' requires a non-empty value.";
+                return false;
+            }
+
+            if (option.Equals("--env", StringComparison.OrdinalIgnoreCase))
+                parsed.Env = value;
+            else if (option.Equals("--connections-file", StringComparison.OrdinalIgnoreCase))
+                parsed.ConnectionsFile = value;
+            else if (option.Equals("--streams-file", StringComparison.OrdinalIgnoreCase))
+                parsed.StreamsFile = value;
+            else if (option.Equals("--streams", StringComparison.OrdinalIgnoreCase))
+                parsed.Streams = value;
+            else if (option.Equals("--log-level", StringComparison.OrdinalIgnoreCase))
+                parsed.LogLevel = value;
         }
-        return null;
+
+        return true;
     }
 
     private static void PrintHelp()
@@ -569,6 +690,20 @@ public static class Program
         Console.WriteLine();
         Console.WriteLine("  --trace");
         Console.WriteLine("      Shortcut for --log-level TRACE. Overrides --debug and --log-level.");
+    }
+
+    private sealed class ParsedArgs
+    {
+        public bool Help { get; set; }
+        public bool TestConnections { get; set; }
+        public bool DeleteDetection { get; set; }
+        public bool Debug { get; set; }
+        public bool Trace { get; set; }
+        public string? Env { get; set; }
+        public string? ConnectionsFile { get; set; }
+        public string? StreamsFile { get; set; }
+        public string? Streams { get; set; }
+        public string? LogLevel { get; set; }
     }
 
     private static string NormalizeStagingFileFormat(string? value)
