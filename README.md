@@ -39,6 +39,22 @@ For automatic changed/deleted row detection, configure per-stream `change_tracki
 dotnet build
 ```
 
+## Test
+
+Run unit tests:
+
+```bash
+dotnet test pluck.sln --filter "Category!=Integration"
+```
+
+Run integration tests (requires Docker running locally):
+
+```bash
+dotnet test pluck.sln --filter "Category=Integration"
+```
+
+Automated test runs are configured in GitHub Actions: `.github/workflows/test.yml`.
+
 ## Run
 
 Default run (`dev`, `connections.yaml`, `streams.yaml`):

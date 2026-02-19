@@ -4,6 +4,8 @@ VisualStudioVersion = 17.5.2.0
 MinimumVisualStudioVersion = 10.0.40219.1
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "pluck", "pluck.csproj", "{82BB60AE-2C38-4502-03F3-5F7B250DBD27}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Pluck.Tests", "Pluck.Tests\Pluck.Tests.csproj", "{E2D1F498-8266-4BD7-8C12-4BE8AB77FC42}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -14,6 +16,10 @@ Global
 		{82BB60AE-2C38-4502-03F3-5F7B250DBD27}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{82BB60AE-2C38-4502-03F3-5F7B250DBD27}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{82BB60AE-2C38-4502-03F3-5F7B250DBD27}.Release|Any CPU.Build.0 = Release|Any CPU
+		{E2D1F498-8266-4BD7-8C12-4BE8AB77FC42}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{E2D1F498-8266-4BD7-8C12-4BE8AB77FC42}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{E2D1F498-8266-4BD7-8C12-4BE8AB77FC42}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{E2D1F498-8266-4BD7-8C12-4BE8AB77FC42}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE

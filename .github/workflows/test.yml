@@ -1,0 +1,32 @@
+name: Test
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Restore
+        run: dotnet restore pluck.sln
+
+      - name: Build
+        run: dotnet build pluck.sln --configuration Release --no-restore
+
+      - name: Test (Unit)
+        run: dotnet test pluck.sln --configuration Release --no-build --filter "Category!=Integration" --verbosity normal
+
+      - name: Test (Integration)
+        run: dotnet test pluck.sln --configuration Release --no-build --filter "Category=Integration" --verbosity normal
