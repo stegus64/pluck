@@ -72,6 +72,14 @@ public sealed class OneLakeUploader
             var fullPath = CombinePath(_baseDirectoryPath, relativeFileName);
             _log.LogDebug("{LogPrefix}Staging delete attempt: {Path}", Prefix(logPrefix), fullPath);
             await fs.DeleteFileAsync(fullPath);
+
+            // Best-effort: remove the parent directory as well (only succeeds if empty).
+            var parentDirectory = GetParentPath(fullPath);
+            if (!string.IsNullOrWhiteSpace(parentDirectory))
+            {
+                _log.LogDebug("{LogPrefix}Staging directory delete attempt: {Path}", Prefix(logPrefix), parentDirectory);
+                await fs.DeleteDirectoryAsync(parentDirectory);
+            }
         }
         catch
         {
@@ -145,6 +153,19 @@ public sealed class OneLakeUploader
             return path;
 
         return $"{path}{query}";
+    }
+
+    private static string? GetParentPath(string path)
+    {
+        var normalized = (path ?? string.Empty).Trim('/').Replace("\\", "/");
+        if (string.IsNullOrWhiteSpace(normalized))
+            return null;
+
+        var idx = normalized.LastIndexOf('/');
+        if (idx <= 0)
+            return null;
+
+        return normalized[..idx];
     }
 
     private static string Prefix(string? logPrefix) =>

@@ -258,8 +258,8 @@ public static class Program
                                         upperBound);
                                 }
 
-                                if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(localPath))
-                                    File.Delete(localPath);
+                                if (envConfig.Cleanup.DeleteLocalTempFiles)
+                                    TryDeleteLocalTempFileAndDirectory(localPath, logger, chunkPrefix);
                                 if (chunkInterval is null)
                                     return null;
 
@@ -346,8 +346,8 @@ public static class Program
                                 rowsPerSecond);
                         }
 
-                        if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(prepared.LocalPath))
-                            File.Delete(prepared.LocalPath);
+                        if (envConfig.Cleanup.DeleteLocalTempFiles)
+                            TryDeleteLocalTempFileAndDirectory(prepared.LocalPath, logger, chunkPrefix);
 
                         if (envConfig.Cleanup.DeleteStagedFiles)
                             await uploader.TryDeleteAsync(prepared.FileName, chunkPrefix);
@@ -403,8 +403,8 @@ public static class Program
                         deleteMetrics.SoftDeleteElapsed.TotalMilliseconds,
                         deleteMetrics.AffectedRows);
 
-                    if (envConfig.Cleanup.DeleteLocalTempFiles && File.Exists(keysLocalPath))
-                        File.Delete(keysLocalPath);
+                    if (envConfig.Cleanup.DeleteLocalTempFiles)
+                        TryDeleteLocalTempFileAndDirectory(keysLocalPath, logger, streamPrefix);
                     if (envConfig.Cleanup.DeleteStagedFiles)
                         await uploader.TryDeleteAsync(keysFileName, streamPrefix);
                 }
@@ -577,4 +577,21 @@ public static class Program
         string FileName,
         int RowCount,
         TimeSpan WriteElapsed);
+
+    private static void TryDeleteLocalTempFileAndDirectory(string localPath, ILogger logger, string logPrefix)
+    {
+        try
+        {
+            if (File.Exists(localPath))
+                File.Delete(localPath);
+
+            var dir = Path.GetDirectoryName(localPath);
+            if (!string.IsNullOrWhiteSpace(dir) && Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "{LogPrefix} Failed to cleanup local temp file/directory: {LocalPath}", logPrefix, localPath);
+        }
+    }
 }
