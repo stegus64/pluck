@@ -1,0 +1,95 @@
+maxParallelStreams: 4
+
+defaults:
+    sourceConnection: "landSql"
+    primaryKey: ["DW_Rowid"]
+    updateKey: "DW_Rowid"
+    chunkSize: 1000000
+    excludeColumns: ["DW_Version"]
+    # "csv", "csv.gz", or "parquet"
+    stagingFileFormat: "csv.gz"
+    targetTable: "{stream_table}"
+    sourceSql: "SELECT * FROM dbo.{stream_table}"
+
+streams:
+  M3_CCURRA:
+  M3_CFACIL:
+  M3_CIDADR:
+  M3_CIDMAS:
+  M3_CIDVEN:
+  M3_CMNDIV:
+  M3_CSYTAB:
+  M3_CVATPC:
+  M3_FCAAVP:
+  M3_FCHACC:
+  M3_FGLEDG:
+  M3_FPLEDG:
+  M3_MGHEAD:
+  M3_MGLINE:
+  M3_MHDISA:
+  M3_MHDISH:
+  M3_MHDISL:
+  M3_MHPICH:
+  M3_MHPICL:
+  M3_MIATTR:
+  M3_MITARE:
+  M3_MITBAL:
+  M3_MITBIL:
+  M3_MITEQU:
+  M3_MITFAC:
+  M3_MITLOC:
+  M3_MITMAH:
+  M3_MITMAS:
+  M3_MITPAC:
+  M3_MITPCE:
+  M3_MITPOP:
+  M3_MITTRA:
+  M3_MITVEN:
+  M3_MITWHL:
+  M3_MMODFE:
+  M3_MPAGRH:
+  M3_MPAGRL:
+  M3_MPAGRP:
+  M3_MPCELE:
+  M3_MPDFHE:
+  M3_MPDOPT:
+  M3_MPHEAD:
+  M3_MPLIND:
+  M3_MPLINE:
+  M3_MPOEXP:
+  M3_MPOPLP:
+  M3_MPORDT:
+  M3_MPPOAD:
+  M3_MPTAWY:
+  M3_MPTRNS:
+  M3_MTEFLD:
+  M3_MTEINF:
+  M3_OCUSAD:
+  M3_OCUSMA:
+  M3_ODCHRG:
+  M3_ODHEAD:
+  M3_ODLINE:
+  M3_OINVOH:
+  M3_OINVOL:
+  M3_OOADRE:
+  M3_OOCHRG:
+  M3_OOHEAD:
+  M3_OOLINE:
+  M3_OOTYPE:
+  M3_OPRICH:
+  M3_OPRICL:
+  M3_OXCNTR:
+  M3_OXLINE:
+  M3_PDNHEA:
+  M3_PDNLIN:
+  M3_ZPACCO:
+  M3_ZPACLI:
+  M3_ZPACSE:
+  M3_ZPAPSG:
+  M3_ZPASTA:
+  M3_ZPASTY:
+  M3_ZPDVOF:
+  M3_ZPPICK:
+  M3_ZRIINS:
+  M3_ZRMCLH:
+  M3_ZRMCLL:

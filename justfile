@@ -20,6 +20,10 @@ test-integration-fabric:
 
 publish-windows:
   dotnet publish pluck.csproj -c Release -r win-x64 --self-contained true -p:PublishSingleFile=true -o publish/win-x64
+  cp *.yaml publish/win-x64/
 
 run *args:
   dotnet run --project pluck.csproj -- {{args}}
+
+run-prod *args:
+  dotnet run --project pluck.csproj -- --streams-file streams_m3.yaml --env prod  {{args}}
