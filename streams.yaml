@@ -1,3 +1,5 @@
+maxParallelStreams: 2
+
 defaults:
     primaryKey: ["DW_Rowid"]
     updateKey: "DW_Rowid"
@@ -14,7 +16,7 @@ streams:
     #ExcludeColumns: ["DW_Version"]
     delete_detection:
       type: subset
-      where: DW_InsertDateTime > dateadd(year, -1, getdate())
+      where: "DW_InsertDateTime > dateadd(year, -1, getdate())"
   M3_CFACIL:
     updateKey: DW_InsertDateTime
     chunkSize: 1y

@@ -121,7 +121,30 @@ public static class Program
                 return 0;
             }
 
-            foreach (var stream in streams.GetResolvedStreams())
+            var resolvedStreams = streams.GetResolvedStreams();
+            var maxParallelStreams = streams.GetMaxParallelStreams();
+            logger.LogInformation(
+                "{LogPrefix} Stream execution mode: maxParallelStreams={MaxParallelStreams}, streamCount={StreamCount}",
+                appPrefix,
+                maxParallelStreams,
+                resolvedStreams.Count);
+
+            if (maxParallelStreams <= 1)
+            {
+                foreach (var stream in resolvedStreams)
+                    await ProcessStreamAsync(stream);
+            }
+            else
+            {
+                await Parallel.ForEachAsync(
+                    resolvedStreams,
+                    new ParallelOptions { MaxDegreeOfParallelism = maxParallelStreams },
+                    async (stream, _) => await ProcessStreamAsync(stream));
+            }
+
+            return 0;
+
+            async Task ProcessStreamAsync(ResolvedStreamConfig stream)
             {
                 var streamPrefix = $"[stream={stream.Name}]";
                 logger.LogInformation("{LogPrefix} === Stream: {StreamName} ===", streamPrefix, stream.Name);
@@ -411,8 +434,6 @@ public static class Program
 
                 logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
             }
-
-            return 0;
         }
         catch (SqlException ex)
         {

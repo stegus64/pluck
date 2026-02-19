@@ -6,12 +6,15 @@ This document describes all supported settings in `streams.yaml`.
 
 `streams.yaml` has two top-level sections:
 
+- `maxParallelStreams`: optional max number of streams to process concurrently (default `1`).
 - `defaults`: optional values applied to every stream.
 - `streams`: required map of stream definitions keyed by stream name.
 
 Example:
 
 ```yaml
+maxParallelStreams: 2
+
 defaults:
   primaryKey: ["DW_Rowid"]
   updateKey: "DW_Rowid"
@@ -28,6 +31,23 @@ streams:
   M3_CFACIL:
     stagingFileFormat: "csv"
 ```
+
+## Top-Level Properties
+
+### `maxParallelStreams` (optional)
+
+Maximum number of streams processed in parallel.
+
+```yaml
+maxParallelStreams: 4
+```
+
+Notes:
+
+- Default is `1` (sequential stream processing).
+- Value must be `>= 1`.
+- Chunk ordering is still preserved within each stream.
+- This setting controls only cross-stream concurrency.
 
 ## How Defaults and Overrides Work
 

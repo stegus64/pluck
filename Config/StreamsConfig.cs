@@ -4,6 +4,8 @@ namespace FabricIncrementalReplicator.Config;
 
 public sealed class StreamsConfig
 {
+    [YamlMember(Alias = "maxParallelStreams")]
+    public int? MaxParallelStreams { get; set; }
     public StreamConfig Defaults { get; set; } = new();
     public Dictionary<string, StreamConfig> Streams { get; set; } = new(StringComparer.OrdinalIgnoreCase);
 
@@ -18,6 +20,15 @@ public sealed class StreamsConfig
         }
 
         return result;
+    }
+
+    public int GetMaxParallelStreams()
+    {
+        var max = MaxParallelStreams ?? 1;
+        if (max <= 0)
+            throw new Exception($"Invalid streams setting 'maxParallelStreams'={max}. Value must be >= 1.");
+
+        return max;
     }
 }
 
