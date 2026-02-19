@@ -15,6 +15,12 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        if (args.Any(a => a.Equals("--help", StringComparison.OrdinalIgnoreCase) || a.Equals("-h", StringComparison.OrdinalIgnoreCase)))
+        {
+            PrintHelp();
+            return 0;
+        }
+
         const string appPrefix = "[app]";
         // Configure logging
         var traceFlag = args.Any(a => a.Equals("--trace", StringComparison.OrdinalIgnoreCase));
@@ -59,6 +65,7 @@ public static class Program
 
 
             var testConnectionsFlag = args.Any(a => a.Equals("--test-connections", StringComparison.OrdinalIgnoreCase));
+            var runDeleteDetection = args.Any(a => a.Equals("--delete_detection", StringComparison.OrdinalIgnoreCase));
 
             var sourceSchemaReader = new SourceSchemaReader(
                 envConfig.SourceSql.ConnectionString,
@@ -160,6 +167,10 @@ public static class Program
                 appPrefix,
                 maxParallelStreams,
                 resolvedStreams.Count);
+            logger.LogInformation(
+                "{LogPrefix} Delete detection runtime switch (--delete_detection): {Enabled}",
+                appPrefix,
+                runDeleteDetection);
 
             if (maxParallelStreams <= 1)
             {
@@ -413,7 +424,7 @@ public static class Program
                     logger.LogInformation("{LogPrefix} No more rows.", streamPrefix);
                 }
 
-                if (string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
+                if (runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
                 {
                     var pkColumns = stream.PrimaryKey
                         .Select(pk => sourceColumns.Single(c => c.Name.Equals(pk, StringComparison.OrdinalIgnoreCase)))
@@ -470,6 +481,12 @@ public static class Program
                     if (envConfig.Cleanup.DeleteStagedFiles)
                         await uploader.TryDeleteAsync(keysFileName, streamPrefix);
                 }
+                else if (!runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
+                {
+                    logger.LogInformation(
+                        "{LogPrefix} Delete detection configured but skipped because --delete_detection was not specified.",
+                        streamPrefix);
+                }
 
                 logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
             }
@@ -514,6 +531,44 @@ public static class Program
                 return args[i + 1];
         }
         return null;
+    }
+
+    private static void PrintHelp()
+    {
+        // Keep this list in sync with runtime argument handling in Main when adding/removing parameters.
+        Console.WriteLine("Usage:");
+        Console.WriteLine("  mysling [options]");
+        Console.WriteLine();
+        Console.WriteLine("Options:");
+        Console.WriteLine("  --help, -h");
+        Console.WriteLine("      Show this help text and exit.");
+        Console.WriteLine();
+        Console.WriteLine("  --env <name>");
+        Console.WriteLine("      Environment key from connections file. Default: dev");
+        Console.WriteLine();
+        Console.WriteLine("  --connections-file <path>");
+        Console.WriteLine("      Path to connections yaml. Default: connections.yaml");
+        Console.WriteLine();
+        Console.WriteLine("  --streams-file <path>");
+        Console.WriteLine("      Path to streams yaml. Default: streams.yaml");
+        Console.WriteLine();
+        Console.WriteLine("  --streams <name1,name2,...>");
+        Console.WriteLine("      Run only the specified comma-separated stream names.");
+        Console.WriteLine();
+        Console.WriteLine("  --test-connections");
+        Console.WriteLine("      Validate source SQL, warehouse SQL, and staging connections, then exit.");
+        Console.WriteLine();
+        Console.WriteLine("  --delete_detection");
+        Console.WriteLine("      Enable delete detection step for streams configured with delete_detection.type: subset.");
+        Console.WriteLine();
+        Console.WriteLine("  --log-level <INFO|DEBUG|TRACE|ERROR>");
+        Console.WriteLine("      Set minimum log level. Default: INFO");
+        Console.WriteLine();
+        Console.WriteLine("  --debug");
+        Console.WriteLine("      Shortcut for --log-level DEBUG.");
+        Console.WriteLine();
+        Console.WriteLine("  --trace");
+        Console.WriteLine("      Shortcut for --log-level TRACE. Overrides --debug and --log-level.");
     }
 
     private static string NormalizeStagingFileFormat(string? value)
