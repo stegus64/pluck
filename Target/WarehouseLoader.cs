@@ -99,6 +99,7 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
         string targetTable,
         string sourceKeysTempTable,
         List<SourceColumn> primaryKeyColumns,
+        int expectedSourceKeyRowCount,
         string sourceKeysDfsUrl,
         string sourceKeysFileFormat,
         string? subsetWhere,
@@ -119,6 +120,19 @@ CREATE TABLE [{targetSchema}].[{sourceKeysTempTable}] (
         var pkColList = string.Join(",", primaryKeyColumns.Select(c => $"[{c.Name}]"));
         var copySql = BuildCopyIntoSql(targetSchema, sourceKeysTempTable, pkColList, sourceKeysDfsUrl, sourceKeysFileFormat);
         var copyElapsed = await ExecAsync(conn, copySql, "copy source keys into temp table", logPrefix);
+        var loadedSourceKeyRowCount = await GetTableRowCountAsync(conn, targetSchema, sourceKeysTempTable);
+        if (loadedSourceKeyRowCount != expectedSourceKeyRowCount)
+        {
+            throw new Exception(
+                $"Delete-detection key row count mismatch for [{targetSchema}].[{sourceKeysTempTable}]. " +
+                $"Source keys={expectedSourceKeyRowCount}, temp table rows={loadedSourceKeyRowCount}.");
+        }
+        _log.LogDebug(
+            "{LogPrefix}Delete-detection key row count verified for temp table [{Schema}].[{Table}]: {RowCount} rows.",
+            Prefix(logPrefix),
+            targetSchema,
+            sourceKeysTempTable,
+            loadedSourceKeyRowCount);
 
         var pkJoin = string.Join(" AND ", primaryKeyColumns.Select(c => $"t.[{c.Name}] = s.[{c.Name}]"));
         var subsetPredicate = string.IsNullOrWhiteSpace(subsetWhere) ? "1=1" : $"({subsetWhere})";

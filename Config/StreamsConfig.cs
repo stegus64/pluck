@@ -45,7 +45,7 @@ public sealed class StreamConfig
     public string? ChunkSize { get; set; }
     // Supported values: "csv.gz" (default), "csv", "parquet"
     public string? StagingFileFormat { get; set; }
-    [YamlMember(Alias = "delete_detection")]
+    [YamlMember(Alias = "delete_detection", ApplyNamingConventions = false)]
     public DeleteDetectionConfig? DeleteDetection { get; set; }
 
     public static StreamConfig Merge(StreamConfig defaults, StreamConfig? streamOverride, string streamName)

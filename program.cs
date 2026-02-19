@@ -151,6 +151,9 @@ public static class Program
                     string.Join(", ", requestedStreams));
             }
 
+            foreach (var stream in resolvedStreams)
+                LogResolvedStreamConfig(stream);
+
             var maxParallelStreams = streams.GetMaxParallelStreams();
             logger.LogInformation(
                 "{LogPrefix} Stream execution mode: maxParallelStreams={MaxParallelStreams}, streamCount={StreamCount}",
@@ -421,10 +424,16 @@ public static class Program
                     var keysFileName = $"{stream.Name}/run={deleteRunId}/delete-keys.csv.gz";
                     var keysLocalPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), "delete-keys.csv.gz");
                     Directory.CreateDirectory(Path.GetDirectoryName(keysLocalPath)!);
+                    logger.LogDebug("{LogPrefix} Delete detection keys local staging path: {LocalPath}", streamPrefix, keysLocalPath);
 
                     var writeKeysSw = System.Diagnostics.Stopwatch.StartNew();
                     var keyWrite = await csvWriter.WriteCsvGzAsync(keysLocalPath, pkColumns, keyStream);
                     writeKeysSw.Stop();
+                    logger.LogDebug(
+                        "{LogPrefix} Delete detection keys file write finished. Rows={RowCount}, ElapsedMs={ElapsedMs:F0}",
+                        streamPrefix,
+                        keyWrite.RowCount,
+                        writeKeysSw.Elapsed.TotalMilliseconds);
 
                     var uploadKeysSw = System.Diagnostics.Stopwatch.StartNew();
                     var keysDfsUrl = await uploader.UploadAsync(keysLocalPath, keysFileName, streamPrefix);
@@ -436,6 +445,7 @@ public static class Program
                         targetTable: targetTable,
                         sourceKeysTempTable: keysTempTable,
                         primaryKeyColumns: pkColumns,
+                        expectedSourceKeyRowCount: keyWrite.RowCount,
                         sourceKeysDfsUrl: keysDfsUrl,
                         sourceKeysFileFormat: "csv.gz",
                         subsetWhere: stream.DeleteDetection.Where,
@@ -462,6 +472,24 @@ public static class Program
                 }
 
                 logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
+            }
+
+            void LogResolvedStreamConfig(ResolvedStreamConfig stream)
+            {
+                var streamPrefix = $"[stream={stream.Name}]";
+                logger.LogDebug(
+                    "{LogPrefix} Resolved stream config: sourceSql={SourceSql}; targetSchema={TargetSchema}; targetTable={TargetTable}; primaryKey=[{PrimaryKey}]; excludeColumns=[{ExcludeColumns}]; updateKey={UpdateKey}; chunkSize={ChunkSize}; stagingFileFormat={StagingFileFormat}; deleteDetectionType={DeleteDetectionType}; deleteDetectionWhere={DeleteDetectionWhere}",
+                    streamPrefix,
+                    stream.SourceSql,
+                    stream.TargetSchema ?? "<env-default>",
+                    stream.TargetTable,
+                    string.Join(", ", stream.PrimaryKey),
+                    stream.ExcludeColumns.Count > 0 ? string.Join(", ", stream.ExcludeColumns) : "<none>",
+                    stream.UpdateKey,
+                    stream.ChunkSize ?? "<none>",
+                    stream.StagingFileFormat,
+                    stream.DeleteDetection.Type,
+                    string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where);
             }
         }
         catch (SqlException ex)

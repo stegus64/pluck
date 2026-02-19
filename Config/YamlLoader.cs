@@ -8,7 +8,6 @@ public sealed class YamlLoader
     private readonly IDeserializer _deserializer =
         new DeserializerBuilder()
             .WithNamingConvention(CamelCaseNamingConvention.Instance)
-            .IgnoreUnmatchedProperties()
             .Build();
 
     public T Load<T>(string path)
