@@ -61,6 +61,23 @@ export PLUCK_ITEST_SQLSERVER="Server=localhost,1433;Database=master;User Id=sa;P
 dotnet test pluck.sln --filter "Category=Integration"
 ```
 
+Run the Fabric-target CT integration test against a real Fabric Warehouse (uses real OneLake upload + `WarehouseLoader` apply path):
+
+```bash
+export PLUCK_ITEST_USE_LOCAL_SQLSERVER=true
+export PLUCK_ITEST_SQLSERVER="Server=localhost,1433;Database=master;User Id=sa;Password=YourPassword;Encrypt=False;TrustServerCertificate=True"
+
+export PLUCK_ITEST_USE_FABRIC_WAREHOUSE=true
+
+# Reuse your existing connections.yaml secrets/config (defaults shown)
+export PLUCK_ITEST_CONNECTIONS_FILE="connections.yaml" # optional, default connections.yaml
+export PLUCK_ITEST_ENV="dev"                           # optional, default dev
+
+# Optional: override any fabric value per run with PLUCK_ITEST_FABRIC_* env vars
+
+dotnet test Pluck.Tests/Pluck.Tests.csproj --filter "FullyQualifiedName~ChangeTracking_Apply_To_Fabric_Target_Should_SoftDelete_Real_Deletes"
+```
+
 Automated test runs are configured in GitHub Actions: `.github/workflows/test.yml`.
 
 ## Run
