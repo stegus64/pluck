@@ -43,8 +43,10 @@ public static class Program
         try
         {
             var env = GetArg(args, "--env") ?? "dev";
-            var connectionsPath = GetArg(args, "--connections") ?? "connections.yaml";
-            var streamsPath = GetArg(args, "--streams") ?? "streams.yaml";
+            var connectionsPath = GetArg(args, "--connections-file") ?? "connections.yaml";
+            var streamsPathArg = GetArg(args, "--streams-file");
+            var streamsFilterArg = GetArg(args, "--streams");
+            var streamsPath = streamsPathArg ?? "streams.yaml";
 
             var loader = new YamlLoader();
             var connectionsRoot = loader.Load<ConnectionsRoot>(connectionsPath);
@@ -122,6 +124,33 @@ public static class Program
             }
 
             var resolvedStreams = streams.GetResolvedStreams();
+            if (!string.IsNullOrWhiteSpace(streamsFilterArg))
+            {
+                var requestedStreams = streamsFilterArg
+                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                    .Where(s => !string.IsNullOrWhiteSpace(s))
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .ToList();
+
+                if (requestedStreams.Count == 0)
+                    throw new Exception("Invalid --streams value. Provide one or more comma-separated stream names.");
+
+                var requestedSet = new HashSet<string>(requestedStreams, StringComparer.OrdinalIgnoreCase);
+                var availableSet = new HashSet<string>(resolvedStreams.Select(s => s.Name), StringComparer.OrdinalIgnoreCase);
+                var missing = requestedStreams.Where(name => !availableSet.Contains(name)).ToList();
+                if (missing.Count > 0)
+                    throw new Exception($"Unknown stream(s) in --streams: {string.Join(", ", missing)}.");
+
+                resolvedStreams = resolvedStreams
+                    .Where(s => requestedSet.Contains(s.Name))
+                    .ToList();
+
+                logger.LogInformation(
+                    "{LogPrefix} Stream filter enabled (--streams): {Streams}",
+                    appPrefix,
+                    string.Join(", ", requestedStreams));
+            }
+
             var maxParallelStreams = streams.GetMaxParallelStreams();
             logger.LogInformation(
                 "{LogPrefix} Stream execution mode: maxParallelStreams={MaxParallelStreams}, streamCount={StreamCount}",
