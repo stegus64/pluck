@@ -122,3 +122,5 @@ dotnet run --project pluck.csproj -- \
 - `maxParallelStreams` in `streams.yaml` controls cross-stream concurrency.
 - Metadata columns are managed in target tables: `_pluck_update_datetime`, `_pluck_update_op`.
 - Keep secrets out of source control for production environments.
+
+## Testing tests
