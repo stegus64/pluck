@@ -62,6 +62,12 @@ Enable delete detection for streams configured with `delete_detection.type: subs
 dotnet run --project pluck.csproj -- --delete_detection
 ```
 
+Stop all remaining streams after the first stream failure:
+
+```bash
+dotnet run --project pluck.csproj -- --failfast
+```
+
 Validate connections and exit:
 
 ```bash
@@ -86,6 +92,7 @@ dotnet run --project pluck.csproj -- \
 --streams <name1,name2,...>
 --test-connections
 --delete_detection
+--failfast
 --log-level <INFO|DEBUG|TRACE|ERROR>
 --debug
 --trace

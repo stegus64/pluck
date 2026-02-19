@@ -8,6 +8,7 @@ using Pluck.Target;
 using Pluck.Util;
 using System.Globalization;
 using System.Text.RegularExpressions;
+using System.Collections.Concurrent;
 
 namespace Pluck;
 
@@ -76,6 +77,7 @@ public static class Program
 
             var testConnectionsFlag = parsedArgs.TestConnections;
             var runDeleteDetection = parsedArgs.DeleteDetection;
+            var failFast = parsedArgs.FailFast;
 
             var uploader = new OneLakeUploader(envConfig.OneLakeStaging, tokenProvider, logger);
             var csvWriter = new CsvGzipWriter();
@@ -174,18 +176,87 @@ public static class Program
                 "{LogPrefix} Delete detection runtime switch (--delete_detection): {Enabled}",
                 appPrefix,
                 runDeleteDetection);
+            logger.LogInformation(
+                "{LogPrefix} Fail-fast runtime switch (--failfast): {Enabled}",
+                appPrefix,
+                failFast);
+
+            var failedStreams = new ConcurrentBag<string>();
+            using var failFastCts = new CancellationTokenSource();
+
+            async Task ExecuteStreamWithHandlingAsync(ResolvedStreamConfig stream, CancellationToken cancellationToken)
+            {
+                if (cancellationToken.IsCancellationRequested)
+                    return;
+
+                try
+                {
+                    await ProcessStreamAsync(stream);
+                }
+                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+                {
+                    logger.LogWarning(
+                        "{LogPrefix} Stream execution canceled due to fail-fast cancellation.",
+                        $"[stream={stream.Name}]");
+                }
+                catch (Exception ex)
+                {
+                    failedStreams.Add(stream.Name);
+                    logger.LogError(ex, "{LogPrefix} Stream failed.", $"[stream={stream.Name}]");
+
+                    if (failFast && !failFastCts.IsCancellationRequested)
+                    {
+                        logger.LogError(
+                            "{LogPrefix} --failfast enabled; canceling remaining streams after failure in stream {StreamName}.",
+                            appPrefix,
+                            stream.Name);
+                        failFastCts.Cancel();
+                    }
+                }
+            }
 
             if (maxParallelStreams <= 1)
             {
                 foreach (var stream in resolvedStreams)
-                    await ProcessStreamAsync(stream);
+                {
+                    if (failFastCts.IsCancellationRequested)
+                        break;
+
+                    await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token);
+                }
             }
             else
             {
-                await Parallel.ForEachAsync(
-                    resolvedStreams,
-                    new ParallelOptions { MaxDegreeOfParallelism = maxParallelStreams },
-                    async (stream, _) => await ProcessStreamAsync(stream));
+                try
+                {
+                    await Parallel.ForEachAsync(
+                        resolvedStreams,
+                        new ParallelOptions
+                        {
+                            MaxDegreeOfParallelism = maxParallelStreams,
+                            CancellationToken = failFastCts.Token
+                        },
+                        async (stream, cancellationToken) => await ExecuteStreamWithHandlingAsync(stream, cancellationToken));
+                }
+                catch (OperationCanceledException) when (failFast && failFastCts.IsCancellationRequested)
+                {
+                    logger.LogInformation("{LogPrefix} Stream execution canceled due to --failfast.", appPrefix);
+                }
+            }
+
+            if (!failedStreams.IsEmpty)
+            {
+                var failed = failedStreams
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(name => name)
+                    .ToList();
+
+                logger.LogError(
+                    "{LogPrefix} Replication run completed with failed streams ({FailedCount}): {FailedStreams}",
+                    appPrefix,
+                    failed.Count,
+                    string.Join(", ", failed));
+                return 1;
             }
 
             return 0;
@@ -567,6 +638,7 @@ public static class Program
             "-h",
             "--test-connections",
             "--delete_detection",
+            "--failfast",
             "--debug",
             "--trace"
         };
@@ -621,6 +693,8 @@ public static class Program
                     parsed.TestConnections = true;
                 else if (option.Equals("--delete_detection", StringComparison.OrdinalIgnoreCase))
                     parsed.DeleteDetection = true;
+                else if (option.Equals("--failfast", StringComparison.OrdinalIgnoreCase))
+                    parsed.FailFast = true;
                 else if (option.Equals("--debug", StringComparison.OrdinalIgnoreCase))
                     parsed.Debug = true;
                 else if (option.Equals("--trace", StringComparison.OrdinalIgnoreCase))
@@ -700,6 +774,9 @@ public static class Program
         Console.WriteLine("  --delete_detection");
         Console.WriteLine("      Enable delete detection step for streams configured with delete_detection.type: subset.");
         Console.WriteLine();
+        Console.WriteLine("  --failfast");
+        Console.WriteLine("      Stop scheduling remaining streams after the first stream failure.");
+        Console.WriteLine();
         Console.WriteLine("  --log-level <INFO|DEBUG|TRACE|ERROR>");
         Console.WriteLine("      Set minimum log level. Default: INFO");
         Console.WriteLine();
@@ -715,6 +792,7 @@ public static class Program
         public bool Help { get; set; }
         public bool TestConnections { get; set; }
         public bool DeleteDetection { get; set; }
+        public bool FailFast { get; set; }
         public bool Debug { get; set; }
         public bool Trace { get; set; }
         public string? Env { get; set; }
