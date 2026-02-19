@@ -7,7 +7,7 @@ defaults:
     # stagingFileFormat: "parquet"
     # stagingFileFormat: "csv"
     targetTable: "{stream_table}"
-    sourceSql: "SELECT * FROM dbo.{stream_table} WHERE DW_Rowid <= 44000"
+    sourceSql: "SELECT * FROM dbo.{stream_table} WHERE DW_Rowid <= 70000"
 
 streams:
   M3_MITMAS:
