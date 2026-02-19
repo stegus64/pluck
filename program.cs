@@ -60,6 +60,7 @@ public static class Program
             var streamsPathArg = parsedArgs.StreamsFile;
             var streamsFilterArg = parsedArgs.Streams;
             var streamsPath = streamsPathArg ?? "streams.yaml";
+            logger.LogInformation("{LogPrefix} Selected environment: {Environment}", appPrefix, env);
 
             var loader = new YamlLoader();
             var connectionsRoot = loader.Load<ConnectionsRoot>(connectionsPath);
@@ -206,6 +207,13 @@ public static class Program
                     sourceCfg.ConnectionString,
                     sourceCfg.CommandTimeoutSeconds,
                     logger);
+                var sourceCsb = new SqlConnectionStringBuilder(sourceCfg.ConnectionString);
+                logger.LogDebug(
+                    "{LogPrefix} Source connection details: sourceConnection={SourceConnection}; server={Server}; database={Database}",
+                    streamPrefix,
+                    stream.SourceConnection,
+                    sourceCsb.DataSource,
+                    sourceCsb.InitialCatalog);
 
                 logger.LogInformation("{LogPrefix} === Stream: {StreamName} ===", streamPrefix, stream.Name);
                 var stagingFileFormat = NormalizeStagingFileFormat(stream.StagingFileFormat);

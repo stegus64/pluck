@@ -5,6 +5,7 @@ defaults:
     primaryKey: ["DW_Rowid"]
     updateKey: "DW_Rowid"
     chunkSize: 100000
+    excludeColumns: ["DW_Version"]
     # "csv", "csv.gz", or "parquet"
     stagingFileFormat: "csv.gz"
     # stagingFileFormat: "parquet"
@@ -14,11 +15,5 @@ defaults:
 
 streams:
   M3_MITMAS:
-    #ExcludeColumns: ["DW_Version"]
-    delete_detection:
-      type: subset
-      where: "DW_InsertDateTime > dateadd(year, -1, getdate())"
   M3_CFACIL:
-    updateKey: DW_InsertDateTime
-    chunkSize: 1y
   
