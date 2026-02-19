@@ -53,6 +53,14 @@ Run integration tests (requires Docker running locally):
 dotnet test pluck.sln --filter "Category=Integration"
 ```
 
+Run integration tests against a local SQL Server instead of Docker:
+
+```bash
+export PLUCK_ITEST_USE_LOCAL_SQLSERVER=true
+export PLUCK_ITEST_SQLSERVER="Server=localhost,1433;Database=master;User Id=sa;Password=YourPassword;Encrypt=False;TrustServerCertificate=True"
+dotnet test pluck.sln --filter "Category=Integration"
+```
+
 Automated test runs are configured in GitHub Actions: `.github/workflows/test.yml`.
 
 ## Run

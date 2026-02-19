@@ -8,15 +8,18 @@ namespace Pluck.Tests;
 
 public sealed class ChangeTrackingIntegrationTests
 {
+    private const string UseLocalSqlServerEnvVar = "PLUCK_ITEST_USE_LOCAL_SQLSERVER";
+    private const string LocalSqlServerConnectionEnvVar = "PLUCK_ITEST_SQLSERVER";
+
     [SkippableFact]
     [Trait("Category", "Integration")]
     public async Task SourceChunkReader_Should_Read_ChangeTracking_Upserts_And_Deletes()
     {
-        var (sqlContainer, skipReason) = await TryStartContainerAsync();
-        Skip.If(sqlContainer is null, skipReason);
-        await using var _ = sqlContainer!;
+        var (sqlTarget, skipReason) = await TryResolveSqlTargetAsync();
+        Skip.If(sqlTarget is null, skipReason);
+        await using var _ = sqlTarget!;
 
-        var testDbConnectionString = await InitializeTestDatabaseAsync(sqlContainer!.GetConnectionString());
+        var testDbConnectionString = await InitializeTestDatabaseAsync(sqlTarget!);
         var reader = new SourceChunkReader(testDbConnectionString);
         var fromVersion = await reader.GetChangeTrackingCurrentVersionAsync();
         fromVersion.Should().NotBeNull();
@@ -73,6 +76,37 @@ VALUES (3, N'Cara', SYSUTCDATETIME());
         deletedIds.Should().Equal(2);
     }
 
+    private static async Task<(IntegrationSqlTarget? Target, string? SkipReason)> TryResolveSqlTargetAsync()
+    {
+        if (ShouldUseLocalSqlServer())
+        {
+            var localConnectionString = Environment.GetEnvironmentVariable(LocalSqlServerConnectionEnvVar);
+            if (string.IsNullOrWhiteSpace(localConnectionString))
+            {
+                return (null,
+                    $"Integration tests are configured to use local SQL Server, but {LocalSqlServerConnectionEnvVar} is not set.");
+            }
+
+            try
+            {
+                await using var conn = new SqlConnection(localConnectionString);
+                await conn.OpenAsync();
+                return (new IntegrationSqlTarget(localConnectionString, useConfiguredDatabase: true, static () => ValueTask.CompletedTask), null);
+            }
+            catch (Exception ex)
+            {
+                return (null,
+                    $"Could not connect to local SQL Server using {LocalSqlServerConnectionEnvVar}: {ex.Message}");
+            }
+        }
+
+        var (container, skipReason) = await TryStartContainerAsync();
+        if (container is null)
+            return (null, skipReason);
+
+        return (new IntegrationSqlTarget(container.GetConnectionString(), useConfiguredDatabase: false, () => container.DisposeAsync()), null);
+    }
+
     private static async Task<(MsSqlContainer? Container, string? SkipReason)> TryStartContainerAsync()
     {
         MsSqlContainer container;
@@ -97,10 +131,15 @@ VALUES (3, N'Cara', SYSUTCDATETIME());
         }
     }
 
-    private static async Task<string> InitializeTestDatabaseAsync(string masterConnectionString)
+    private static async Task<string> InitializeTestDatabaseAsync(IntegrationSqlTarget sqlTarget)
     {
-        await using (var conn = new SqlConnection(masterConnectionString))
+        var csb = new SqlConnectionStringBuilder(sqlTarget.ConnectionString);
+        var hasConfiguredDb = !string.IsNullOrWhiteSpace(csb.InitialCatalog);
+        var useConfiguredDb = sqlTarget.UseConfiguredDatabase && hasConfiguredDb;
+
+        if (!useConfiguredDb)
         {
+            await using var conn = new SqlConnection(sqlTarget.ConnectionString);
             await conn.OpenAsync();
             await ExecuteNonQueryAsync(conn, @"
 IF DB_ID(N'PluckCtTest') IS NULL
@@ -108,20 +147,30 @@ BEGIN
     CREATE DATABASE [PluckCtTest];
 END;
 ");
-            await ExecuteNonQueryAsync(conn, @"
-ALTER DATABASE [PluckCtTest]
-SET CHANGE_TRACKING = ON (CHANGE_RETENTION = 2 DAYS, AUTO_CLEANUP = ON);
-");
+            csb.InitialCatalog = "PluckCtTest";
         }
 
-        var csb = new SqlConnectionStringBuilder(masterConnectionString)
-        {
-            InitialCatalog = "PluckCtTest"
-        };
         var testDbConnectionString = csb.ConnectionString;
 
         await using var testConn = new SqlConnection(testDbConnectionString);
         await testConn.OpenAsync();
+        await ExecuteNonQueryAsync(testConn, @"
+IF EXISTS (
+    SELECT 1
+    FROM sys.change_tracking_databases
+    WHERE database_id = DB_ID()
+)
+BEGIN
+    SELECT 1;
+END
+ELSE
+BEGIN
+    DECLARE @sql nvarchar(max) =
+        N'ALTER DATABASE ' + QUOTENAME(DB_NAME()) +
+        N' SET CHANGE_TRACKING = ON (CHANGE_RETENTION = 2 DAYS, AUTO_CLEANUP = ON);';
+    EXEC sp_executesql @sql;
+END;
+");
         await ExecuteNonQueryAsync(testConn, @"
 IF OBJECT_ID(N'dbo.Customers', N'U') IS NOT NULL
 BEGIN
@@ -161,5 +210,23 @@ VALUES (1, N'Alice', SYSUTCDATETIME()),
         await foreach (var row in source)
             result.Add(row);
         return result;
+    }
+
+    private static bool ShouldUseLocalSqlServer()
+    {
+        var value = Environment.GetEnvironmentVariable(UseLocalSqlServerEnvVar);
+        return bool.TryParse(value, out var parsed) && parsed;
+    }
+
+    private sealed class IntegrationSqlTarget(string connectionString, bool useConfiguredDatabase, Func<ValueTask> disposeAsync) : IAsyncDisposable
+    {
+        public string ConnectionString { get; } = connectionString;
+        public bool UseConfiguredDatabase { get; } = useConfiguredDatabase;
+        private readonly Func<ValueTask> _disposeAsync = disposeAsync;
+
+        public async ValueTask DisposeAsync()
+        {
+            await _disposeAsync();
+        }
     }
 }
