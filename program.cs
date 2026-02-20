@@ -66,7 +66,9 @@ public static class Program
             var streamsPathArg = parsedArgs.StreamsFile;
             var streamsFilterArg = parsedArgs.Streams;
             var streamsPath = streamsPathArg ?? "streams.yaml";
+            var tempPath = parsedArgs.TempPath ?? Path.GetTempPath();
             logger.LogInformation("{LogPrefix} Selected environment: {Environment}", appPrefix, env);
+            logger.LogInformation("{LogPrefix} Temp path for local files: {TempPath}", appPrefix, tempPath);
 
             var loader = new YamlLoader();
             var connectionsRoot = loader.Load<ConnectionsRoot>(connectionsPath);
@@ -101,6 +103,7 @@ public static class Program
                 failFast,
                 csvWriter,
                 parquetWriter,
+                tempPath,
                 logger,
                 appPrefix);
         }
@@ -127,6 +130,7 @@ public static class Program
         bool failFast,
         CsvGzipWriter csvWriter,
         ParquetChunkWriter parquetWriter,
+        string tempPath,
         ILogger logger,
         string appPrefix)
     {
@@ -158,7 +162,7 @@ public static class Program
                 if (failFastCts.IsCancellationRequested)
                     break;
 
-                await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token, failFast, logger, appPrefix, failedStreams, failFastCts, envConfig, destinationConnections, runDeleteDetection, csvWriter, parquetWriter);
+                await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token, failFast, logger, appPrefix, failedStreams, failFastCts, envConfig, destinationConnections, runDeleteDetection, csvWriter, parquetWriter, tempPath);
             }
         }
         else
@@ -172,7 +176,7 @@ public static class Program
                         MaxDegreeOfParallelism = maxParallelStreams,
                         CancellationToken = failFastCts.Token
                     },
-                    async (stream, cancellationToken) => await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token, failFast, logger, appPrefix, failedStreams, failFastCts, envConfig, destinationConnections, runDeleteDetection, csvWriter, parquetWriter));
+                    async (stream, cancellationToken) => await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token, failFast, logger, appPrefix, failedStreams, failFastCts, envConfig, destinationConnections, runDeleteDetection, csvWriter, parquetWriter, tempPath));
             }
             catch (OperationCanceledException) when (failFast && failFastCts.IsCancellationRequested)
             {
@@ -199,7 +203,7 @@ public static class Program
 
         }
 
-    private static async Task ProcessStreamAsync(ResolvedStreamConfig stream, EnvironmentConfig envConfig, Dictionary<string, DestinationConnectionConfig> destinationConnections, bool runDeleteDetection, CsvGzipWriter csvWriter, ParquetChunkWriter parquetWriter, ILogger logger, string appPrefix)
+    private static async Task ProcessStreamAsync(ResolvedStreamConfig stream, EnvironmentConfig envConfig, Dictionary<string, DestinationConnectionConfig> destinationConnections, bool runDeleteDetection, CsvGzipWriter csvWriter, ParquetChunkWriter parquetWriter, string tempPath, ILogger logger, string appPrefix)
     {
         var streamPrefix = $"[stream={stream.Name}]";
         if (!envConfig.SourceConnections.TryGetValue(stream.SourceConnection, out var sourceCfg))
@@ -330,7 +334,8 @@ public static class Program
                 sqlServerLoader,
                 targetSchema,
                 targetTable,
-                sourceColumns);
+                sourceColumns,
+                tempPath);
             ctVersionToPersistAfterStandard = ctVersionToPersist;
             if (ok)
             {
@@ -358,7 +363,7 @@ public static class Program
         if (srcMin is not null && srcMax is not null)
         {
             var chunkInterval = ParseChunkInterval(stream.ChunkSize, stream.Name);
-            Task<PreparedChunk?>? prepareNextTask = PrepareNextChunkAsync(srcMin, chunkIndex + 1, envConfig, csvWriter, parquetWriter, logger, stream, destinationType, sourceChunkReader, stagingFileFormat, sqlServerBufferChunksToCsv, sourceColumns, srcMax, chunkInterval);
+            Task<PreparedChunk?>? prepareNextTask = PrepareNextChunkAsync(srcMin, chunkIndex + 1, envConfig, csvWriter, parquetWriter, logger, stream, destinationType, sourceChunkReader, stagingFileFormat, sqlServerBufferChunksToCsv, sourceColumns, srcMax, chunkInterval, tempPath);
 
             while (prepareNextTask is not null)
             {
@@ -367,7 +372,7 @@ public static class Program
                     break;
 
                 prepareNextTask = prepared.NextLowerBound is not null
-                    ? PrepareNextChunkAsync(prepared.NextLowerBound, prepared.ChunkIndex + 1, envConfig, csvWriter, parquetWriter, logger, stream, destinationType, sourceChunkReader, stagingFileFormat, sqlServerBufferChunksToCsv, sourceColumns, srcMax, chunkInterval)
+                    ? PrepareNextChunkAsync(prepared.NextLowerBound, prepared.ChunkIndex + 1, envConfig, csvWriter, parquetWriter, logger, stream, destinationType, sourceChunkReader, stagingFileFormat, sqlServerBufferChunksToCsv, sourceColumns, srcMax, chunkInterval, tempPath)
                     : null;
 
                 await ProcessPreparedChunkAsync(prepared, stream, envConfig, logger, destinationType, stagingFileFormat, uploader, fabricLoader, sqlServerLoader, targetSchema, targetTable, sourceColumns, srcMax, chunkInterval);
@@ -381,7 +386,7 @@ public static class Program
 
         if (runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
         {
-            await ProcessDeleteDetection(stream, envConfig, csvWriter, logger, streamPrefix, destinationType, sourceChunkReader, uploader, fabricLoader, sqlServerLoader, targetSchema, targetTable, sourceColumns);
+            await ProcessDeleteDetection(stream, envConfig, csvWriter, logger, streamPrefix, destinationType, sourceChunkReader, uploader, fabricLoader, sqlServerLoader, targetSchema, targetTable, sourceColumns, tempPath);
         }
         else if (!runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
         {
@@ -419,7 +424,8 @@ public static class Program
         SqlServerDestinationLoader? sqlServerLoader,
         string targetSchema,
         string targetTable,
-        List<SourceColumn> sourceColumns)
+        List<SourceColumn> sourceColumns,
+        string tempPath)
     {
         var pkColumns = stream.PrimaryKey
             .Select(pk => sourceColumns.Single(c => c.Name.Equals(pk, StringComparison.OrdinalIgnoreCase)))
@@ -430,7 +436,7 @@ public static class Program
         {
             var deleteRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
             var keysFileName = $"{stream.Name}/run={deleteRunId}/delete-keys.csv.gz";
-            var keysLocalPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), "delete-keys.csv.gz");
+            var keysLocalPath = Path.Combine(tempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), "delete-keys.csv.gz");
             Directory.CreateDirectory(Path.GetDirectoryName(keysLocalPath)!);
             logger.LogDebug("{LogPrefix} Delete detection keys local staging path: {LocalPath}", streamPrefix, keysLocalPath);
 
@@ -730,7 +736,8 @@ public static class Program
         SqlServerDestinationLoader? sqlServerLoader,
         string targetSchema,
         string targetTable,
-        List<SourceColumn> sourceColumns)
+        List<SourceColumn> sourceColumns,
+        string tempPath)
     {
         var ctSourceTable = stream.ChangeTracking.SourceTable!;
         var ctSyncToVersion = await sourceChunkReader.GetChangeTrackingCurrentVersionAsync(streamPrefix);
@@ -762,7 +769,8 @@ public static class Program
                 sourceColumns,
                 ctSourceTable,
                 ctSyncToVersion.Value,
-                ctLastSyncVersion);
+                ctLastSyncVersion,
+                tempPath);
             return (true, null);
         }
 
@@ -795,7 +803,8 @@ public static class Program
         List<SourceColumn> sourceColumns,
         string ctSourceTable,
         long ctSyncToVersion,
-        long ctLastSyncVersion)
+        long ctLastSyncVersion,
+        string tempPath)
     {
         var ctMinValidVersion = await sourceChunkReader.GetChangeTrackingMinValidVersionAsync(ctSourceTable, streamPrefix);
         if (ctMinValidVersion is null)
@@ -831,7 +840,7 @@ public static class Program
             var ext = stagingFileFormat == "parquet" ? "parquet" : (stagingFileFormat == "csv" ? "csv" : "csv.gz");
             var upsertRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
             var upsertFileName = $"{stream.Name}/run={upsertRunId}/ct-upserts.{ext}";
-            var upsertLocalPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"ct-upserts.{ext}");
+            var upsertLocalPath = Path.Combine(tempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"ct-upserts.{ext}");
             Directory.CreateDirectory(Path.GetDirectoryName(upsertLocalPath)!);
 
             var upsertRows = sourceChunkReader.ReadChangeTrackingUpsertsAsync(
@@ -892,7 +901,7 @@ public static class Program
 
             var deleteRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
             var deleteKeysFileName = $"{stream.Name}/run={deleteRunId}/ct-delete-keys.csv.gz";
-            var deleteKeysLocalPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), "ct-delete-keys.csv.gz");
+            var deleteKeysLocalPath = Path.Combine(tempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), "ct-delete-keys.csv.gz");
             Directory.CreateDirectory(Path.GetDirectoryName(deleteKeysLocalPath)!);
 
             var deleteKeysRows = sourceChunkReader.ReadChangeTrackingDeletedKeysAsync(
@@ -1053,14 +1062,15 @@ public static class Program
         Dictionary<string, DestinationConnectionConfig> destinationConnections,
         bool runDeleteDetection,
         CsvGzipWriter csvWriter,
-        ParquetChunkWriter parquetWriter)
+        ParquetChunkWriter parquetWriter,
+        string tempPath)
     {
         if (cancellationToken.IsCancellationRequested)
             return;
 
         try
         {
-            await ProcessStreamAsync(stream, envConfig, destinationConnections,  runDeleteDetection,  csvWriter,  parquetWriter,  logger,  appPrefix);
+            await ProcessStreamAsync(stream, envConfig, destinationConnections,  runDeleteDetection,  csvWriter,  parquetWriter, tempPath,  logger,  appPrefix);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
@@ -1100,7 +1110,8 @@ public static class Program
         bool sqlServerBufferChunksToCsv,
         List<SourceColumn> sourceColumns,
         object srcMax,
-        ChunkInterval? chunkInterval)
+        ChunkInterval? chunkInterval,
+        string tempPath)
     {
         var lowerBound = initialLowerBound;
         while (CompareUpdateKey(lowerBound, srcMax) <= 0)
@@ -1129,7 +1140,7 @@ public static class Program
                 var ext = stagingFileFormat == "parquet" ? "parquet" : (stagingFileFormat == "csv" ? "csv" : "csv.gz");
                 var runId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
                 var fileName = $"{stream.Name}/run={runId}/chunk={nextChunkIndex:D6}.{ext}";
-                var localPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"chunk.{ext}");
+                var localPath = Path.Combine(tempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"chunk.{ext}");
                 Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
                 logger.LogDebug("{LogPrefix} Next chunk local staging path: {LocalPath}", chunkPrefix, localPath);
 
@@ -1185,7 +1196,7 @@ public static class Program
 
             if (destinationType == "sqlServer" && sqlServerBufferChunksToCsv)
             {
-                var localPath = Path.Combine(Path.GetTempPath(), "pluck-sqlserver-bulkcopy", Guid.NewGuid().ToString("N"), "chunk.csv");
+                var localPath = Path.Combine(tempPath, "pluck-sqlserver-bulkcopy", Guid.NewGuid().ToString("N"), "chunk.csv");
                 Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
                 logger.LogDebug("{LogPrefix} Next chunk local csv spool path: {LocalPath}", chunkPrefix, localPath);
 
@@ -1406,6 +1417,7 @@ public static class Program
             "--env",
             "--connections-file",
             "--streams-file",
+            "--temp-path",
             "--streams",
             "--log-level"
         };
@@ -1514,6 +1526,8 @@ public static class Program
                 parsed.ConnectionsFile = value;
             else if (option.Equals("--streams-file", StringComparison.OrdinalIgnoreCase))
                 parsed.StreamsFile = value;
+            else if (option.Equals("--temp-path", StringComparison.OrdinalIgnoreCase))
+                parsed.TempPath = value;
             else if (option.Equals("--streams", StringComparison.OrdinalIgnoreCase))
                 parsed.Streams = value;
             else if (option.Equals("--log-level", StringComparison.OrdinalIgnoreCase))
@@ -1541,6 +1555,9 @@ public static class Program
         Console.WriteLine();
         Console.WriteLine("  --streams-file <path>");
         Console.WriteLine("      Path to streams yaml. Default: streams.yaml");
+        Console.WriteLine();
+        Console.WriteLine("  --temp-path <path>");
+        Console.WriteLine("      Base directory for large local temporary files. Default: OS temp path.");
         Console.WriteLine();
         Console.WriteLine("  --streams <name1,name2,...>");
         Console.WriteLine("      Run only the specified comma-separated stream names.");
@@ -1575,6 +1592,7 @@ public static class Program
         public string? Env { get; set; }
         public string? ConnectionsFile { get; set; }
         public string? StreamsFile { get; set; }
+        public string? TempPath { get; set; }
         public string? Streams { get; set; }
         public string? LogLevel { get; set; }
     }
