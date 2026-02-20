@@ -46,3 +46,16 @@ The fetching of primary keys from the source is not subject to any chunking. We 
 The delete detection should run as a separate step for each stream after all chunks have been processed.
 
 Ask for clarification if anything is unclear
+
+
+I want to support mutiple types of destinations. One streams file only needds to support a single destination
+but you need to be able specify multiple destinations in the connections file.
+
+The destinations should be named just as the sources.
+
+Add support for using on-prem sql server as a destination. Use SqlBulkCopy to write data to temp tables, then use the same 
+kind of MERGE for upsert as the fabric destination.
+
+We might add other methods than SqlBulkCopy later, so be prepared for that.
+
+We will also add other types of destinations later, for example Databricks, Big Query, and Snowflake but focus on just onprem sql server now.

@@ -36,6 +36,7 @@ public sealed class StreamsConfig
 public sealed class StreamConfig
 {
     public string? SourceConnection { get; set; }
+    public string? DestinationConnection { get; set; }
     public string? SourceSql { get; set; }
     public string? TargetTable { get; set; }
     public string? TargetSchema { get; set; }
@@ -58,6 +59,7 @@ public sealed class StreamConfig
         {
             SourceSql = streamOverride?.SourceSql ?? defaults.SourceSql,
             SourceConnection = streamOverride?.SourceConnection ?? defaults.SourceConnection,
+            DestinationConnection = streamOverride?.DestinationConnection ?? defaults.DestinationConnection,
             TargetTable = streamOverride?.TargetTable ?? defaults.TargetTable,
             TargetSchema = streamOverride?.TargetSchema ?? defaults.TargetSchema,
             PrimaryKey = streamOverride?.PrimaryKey ?? defaults.PrimaryKey,
@@ -71,6 +73,7 @@ public sealed class StreamConfig
 
         merged.SourceSql = ApplyToken(merged.SourceSql, streamName);
         merged.SourceConnection = ApplyToken(merged.SourceConnection, streamName);
+        merged.DestinationConnection = ApplyToken(merged.DestinationConnection, streamName);
         merged.TargetTable = ApplyToken(merged.TargetTable, streamName);
         merged.TargetSchema = ApplyToken(merged.TargetSchema, streamName);
         merged.UpdateKey = ApplyToken(merged.UpdateKey, streamName);
@@ -107,6 +110,7 @@ public sealed class StreamConfig
         {
             Name = streamName,
             SourceConnection = SourceConnection,
+            DestinationConnection = DestinationConnection ?? "",
             SourceSql = SourceSql,
             TargetTable = TargetTable,
             TargetSchema = string.IsNullOrWhiteSpace(TargetSchema) ? null : TargetSchema,
@@ -133,6 +137,7 @@ public sealed class ResolvedStreamConfig
 {
     public string Name { get; set; } = "";
     public string SourceConnection { get; set; } = "";
+    public string DestinationConnection { get; set; } = "";
     public string SourceSql { get; set; } = "";
     public string TargetTable { get; set; } = "";
     public string? TargetSchema { get; set; }

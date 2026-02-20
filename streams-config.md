@@ -17,6 +17,7 @@ maxParallelStreams: 2
 
 defaults:
   sourceConnection: "landSql"
+  destinationConnection: "fabric"
   primaryKey: ["DW_Rowid"]
   updateKey: "DW_Rowid"
   chunkSize: "50000"
@@ -85,6 +86,20 @@ Named source connection to use for this stream. The name must exist in
 ```yaml
 sourceConnection: "landSql"
 ```
+
+### `destinationConnection` (recommended in `defaults`)
+
+Named destination to use for this stream. The name must exist in
+`connections.yaml` under `environments.<env>.destinationConnections`.
+
+```yaml
+destinationConnection: "fabric"
+```
+
+Notes:
+
+- If exactly one destination exists in `connections.yaml`, streams may omit this and Pluck will auto-select that single destination.
+- If multiple destinations exist, set `defaults.destinationConnection` (or per-stream `destinationConnection`).
 
 ### `targetTable` (required)
 
@@ -236,6 +251,7 @@ Behavior:
 ```yaml
 defaults:
   sourceConnection: "landSql"
+  destinationConnection: "fabric"
   primaryKey: ["DW_Rowid"]
   updateKey: "DW_Rowid"
   chunkSize: "7d"
@@ -284,6 +300,7 @@ Notes:
 A stream must resolve to valid values for:
 
 - `sourceConnection`
+- `destinationConnection` (or exactly one destination defined in connections)
 - `sourceSql`
 - `targetTable`
 - `primaryKey`

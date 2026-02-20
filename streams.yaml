@@ -2,6 +2,7 @@ maxParallelStreams: 2
 
 defaults:
     sourceConnection: "landSql"
+    destinationConnection: "fabric"
     primaryKey: ["DW_Rowid"]
     updateKey: "DW_Rowid"
     chunkSize: 100000

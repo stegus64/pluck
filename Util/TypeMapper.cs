@@ -86,4 +86,10 @@ public static class TypeMapper
             _ => "nvarchar(max)"
         };
     }
+
+    // For SQL Server destinations, source SQL Server type expressions are compatible.
+    public static string SqlServerToSqlServerType(string sqlServerType)
+    {
+        return sqlServerType.Trim().ToLowerInvariant();
+    }
 }

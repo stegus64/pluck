@@ -1,6 +1,6 @@
 # Pluck
 
-Pluck is a .NET 8 CLI for incremental replication from SQL Server sources into Microsoft Fabric Warehouse using OneLake staging files.
+Pluck is a .NET 8 CLI for incremental replication from SQL Server sources into configurable named destinations.
 
 ## What it does
 
@@ -8,8 +8,9 @@ Pluck is a .NET 8 CLI for incremental replication from SQL Server sources into M
 - Reads environment and connection settings from `connections.yaml`
 - Pulls source data in update-key chunks
 - Supports per-stream SQL Server Change Tracking mode for changed/deleted rows
-- Writes chunk files (`csv`, `csv.gz`, or `parquet`) locally and uploads to OneLake
-- Loads into Fabric Warehouse with `COPY INTO` + merge/upsert
+- Supports named destination connections (one destination per stream)
+- Fabric Warehouse destination: uploads staged files to OneLake and loads with `COPY INTO` + merge/upsert
+- SQL Server destination: uses `SqlBulkCopy` into temp tables, then `MERGE` upsert/soft-delete
 - Optionally runs delete detection (`delete_detection.type: subset`) when `--delete_detection` is enabled
 
 ## Prerequisites
@@ -23,7 +24,7 @@ Pluck is a .NET 8 CLI for incremental replication from SQL Server sources into M
 
 ## Configuration
 
-- `connections.yaml`: environment-specific source, warehouse, staging, auth, and cleanup settings
+- `connections.yaml`: environment-specific source and destination connection settings plus cleanup behavior
 - `streams.yaml`: stream defaults and per-stream replication settings
 
 Detailed config references:

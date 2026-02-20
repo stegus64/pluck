@@ -31,6 +31,7 @@ public class StreamsConfigTests
             Defaults = new StreamConfig
             {
                 SourceConnection = "landSql",
+                DestinationConnection = "fabricLanding",
                 SourceSql = "SELECT * FROM dbo.{stream_table}",
                 TargetTable = "{stream_table}",
                 PrimaryKey = ["DW_Rowid"],
@@ -56,6 +57,7 @@ public class StreamsConfigTests
         stream.Name.Should().Be("M3_MITMAS");
         stream.SourceSql.Should().Be("SELECT * FROM dbo.M3_MITMAS");
         stream.TargetTable.Should().Be("M3_MITMAS");
+        stream.DestinationConnection.Should().Be("fabricLanding");
         stream.ChangeTracking.Enabled.Should().BeTrue();
         stream.ChangeTracking.SourceTable.Should().Be("dbo.M3_MITMAS");
     }
@@ -108,6 +110,7 @@ public class StreamsConfigTests
         new()
         {
             SourceConnection = "landSql",
+            DestinationConnection = "fabricLanding",
             SourceSql = "SELECT * FROM dbo.{stream_table}",
             TargetTable = "{stream_table}",
             PrimaryKey = ["DW_Rowid"],
