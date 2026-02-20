@@ -370,153 +370,8 @@ public static class Program
                     ? PrepareNextChunkAsync(prepared.NextLowerBound, prepared.ChunkIndex + 1, envConfig, csvWriter, parquetWriter, logger, stream, destinationType, sourceChunkReader, stagingFileFormat, sqlServerBufferChunksToCsv, sourceColumns, srcMax, chunkInterval)
                     : null;
 
-                await ProcessPreparedChunkAsync(prepared);
+                await ProcessPreparedChunkAsync(prepared, stream, envConfig, logger, destinationType, stagingFileFormat, uploader, fabricLoader, sqlServerLoader, targetSchema, targetTable, sourceColumns, srcMax, chunkInterval);
                 chunkIndex = prepared.ChunkIndex;
-            }
-
-            async Task ProcessPreparedChunkAsync(PreparedChunk prepared)
-            {
-                var chunkPrefix = ChunkLogPrefix(prepared.ChunkIndex, stream);
-                if (destinationType == "fabricWarehouse")
-                {
-                    var uploadSw = System.Diagnostics.Stopwatch.StartNew();
-                    var oneLakePath = await uploader!.UploadAsync(prepared.LocalPath!, prepared.FileName!, chunkPrefix);
-                    uploadSw.Stop();
-                    var uploadedFileSizeKb = new FileInfo(prepared.LocalPath!).Length / 1024d;
-
-                    var tempTable = $"__tmp_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-                    var warehouseMetrics = await fabricLoader!.LoadAndMergeAsync(
-                        targetSchema: targetSchema,
-                        targetTable: targetTable,
-                        tempTable: tempTable,
-                        columns: sourceColumns,
-                        primaryKey: stream.PrimaryKey,
-                        expectedRowCount: prepared.RowCount,
-                        oneLakeDfsUrl: oneLakePath,
-                        stagingFileFormat: stagingFileFormat,
-                        cleanup: envConfig.Cleanup,
-                        logPrefix: chunkPrefix
-                    );
-
-                    var totalSeconds =
-                        prepared.WriteElapsed.TotalSeconds +
-                        uploadSw.Elapsed.TotalSeconds +
-                        warehouseMetrics.CopyIntoElapsed.TotalSeconds +
-                        warehouseMetrics.MergeElapsed.TotalSeconds;
-                    var rowsPerSecond = totalSeconds > 0
-                        ? prepared.RowCount / totalSeconds
-                        : 0d;
-
-                    if (chunkInterval is null)
-                    {
-                        logger.LogInformation(
-                            "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, maxInclusive={MaxInclusive}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
-                            chunkPrefix,
-                            prepared.ChunkIndex,
-                            prepared.RowCount,
-                            prepared.LowerBound,
-                            srcMax,
-                            uploadedFileSizeKb,
-                            prepared.WriteElapsed.TotalMilliseconds,
-                            uploadSw.Elapsed.TotalMilliseconds,
-                            warehouseMetrics.CopyIntoElapsed.TotalMilliseconds,
-                            warehouseMetrics.MergeElapsed.TotalMilliseconds,
-                            rowsPerSecond);
-                    }
-                    else
-                    {
-                        logger.LogInformation(
-                            "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
-                            chunkPrefix,
-                            prepared.ChunkIndex,
-                            prepared.RowCount,
-                            prepared.LowerBound,
-                            prepared.UpperBound,
-                            uploadedFileSizeKb,
-                            prepared.WriteElapsed.TotalMilliseconds,
-                            uploadSw.Elapsed.TotalMilliseconds,
-                            warehouseMetrics.CopyIntoElapsed.TotalMilliseconds,
-                            warehouseMetrics.MergeElapsed.TotalMilliseconds,
-                            rowsPerSecond);
-                    }
-
-                    if (envConfig.Cleanup.DeleteLocalTempFiles)
-                        TryDeleteLocalTempFileAndDirectory(prepared.LocalPath!, logger, chunkPrefix);
-
-                    if (envConfig.Cleanup.DeleteStagedFiles)
-                        await uploader.TryDeleteAsync(prepared.FileName!, chunkPrefix);
-                }
-                else
-                {
-                    var tempTable = $"__tmp_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-                    SqlServerDestinationChunkMetrics sqlMetrics;
-                    if (prepared.LocalPath is not null && prepared.RowStream is null)
-                    {
-                        sqlMetrics = await sqlServerLoader!.LoadAndMergeFromCsvAsync(
-                            targetSchema: targetSchema,
-                            targetTable: targetTable,
-                            tempTable: tempTable,
-                            columns: sourceColumns,
-                            primaryKey: stream.PrimaryKey,
-                            csvPath: prepared.LocalPath,
-                            expectedRowCount: prepared.RowCount,
-                            cleanup: envConfig.Cleanup,
-                            logPrefix: chunkPrefix);
-                    }
-                    else
-                    {
-                        sqlMetrics = await sqlServerLoader!.LoadAndMergeAsync(
-                            targetSchema: targetSchema,
-                            targetTable: targetTable,
-                            tempTable: tempTable,
-                            columns: sourceColumns,
-                            primaryKey: stream.PrimaryKey,
-                            rows: prepared.RowStream!,
-                            cleanup: envConfig.Cleanup,
-                            logPrefix: chunkPrefix);
-                    }
-
-                    var totalSeconds =
-                        prepared.WriteElapsed.TotalSeconds +
-                        sqlMetrics.BulkCopyElapsed.TotalSeconds +
-                        sqlMetrics.MergeElapsed.TotalSeconds;
-                    var effectiveRowCount = sqlMetrics.RowsCopied;
-                    var rowsPerSecond = totalSeconds > 0
-                        ? effectiveRowCount / totalSeconds
-                        : 0d;
-
-                    if (chunkInterval is null)
-                    {
-                        logger.LogInformation(
-                            "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, maxInclusive={MaxInclusive}, materializeMs={MaterializeMs:F0}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
-                            chunkPrefix,
-                            prepared.ChunkIndex,
-                            effectiveRowCount,
-                            prepared.LowerBound,
-                            srcMax,
-                            prepared.WriteElapsed.TotalMilliseconds,
-                            sqlMetrics.BulkCopyElapsed.TotalMilliseconds,
-                            sqlMetrics.MergeElapsed.TotalMilliseconds,
-                            rowsPerSecond);
-                    }
-                    else
-                    {
-                        logger.LogInformation(
-                            "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, preLoadMs={PreLoadMs:F0}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
-                            chunkPrefix,
-                            prepared.ChunkIndex,
-                            effectiveRowCount,
-                            prepared.LowerBound,
-                            prepared.UpperBound,
-                            prepared.WriteElapsed.TotalMilliseconds,
-                            sqlMetrics.BulkCopyElapsed.TotalMilliseconds,
-                            sqlMetrics.MergeElapsed.TotalMilliseconds,
-                            rowsPerSecond);
-                    }
-
-                    if (envConfig.Cleanup.DeleteLocalTempFiles && prepared.LocalPath is not null)
-                        TryDeleteLocalTempFileAndDirectory(prepared.LocalPath, logger, chunkPrefix);
-                }
             }
         }
         else
@@ -526,87 +381,7 @@ public static class Program
 
         if (runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
         {
-            var pkColumns = stream.PrimaryKey
-                .Select(pk => sourceColumns.Single(c => c.Name.Equals(pk, StringComparison.OrdinalIgnoreCase)))
-                .ToList();
-            var keyStream = sourceChunkReader.ReadColumnsAsync(stream.SourceSql, stream.PrimaryKey, stream.DeleteDetection.Where, streamPrefix);
-
-            if (destinationType == "fabricWarehouse")
-            {
-                var deleteRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
-                var keysFileName = $"{stream.Name}/run={deleteRunId}/delete-keys.csv.gz";
-                var keysLocalPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), "delete-keys.csv.gz");
-                Directory.CreateDirectory(Path.GetDirectoryName(keysLocalPath)!);
-                logger.LogDebug("{LogPrefix} Delete detection keys local staging path: {LocalPath}", streamPrefix, keysLocalPath);
-
-                var writeKeysSw = System.Diagnostics.Stopwatch.StartNew();
-                var keyWrite = await csvWriter.WriteCsvGzAsync(keysLocalPath, pkColumns, keyStream);
-                writeKeysSw.Stop();
-                logger.LogDebug(
-                    "{LogPrefix} Delete detection keys file write finished. Rows={RowCount}, ElapsedMs={ElapsedMs:F0}",
-                    streamPrefix,
-                    keyWrite.RowCount,
-                    writeKeysSw.Elapsed.TotalMilliseconds);
-
-                var uploadKeysSw = System.Diagnostics.Stopwatch.StartNew();
-                var keysDfsUrl = await uploader!.UploadAsync(keysLocalPath, keysFileName, streamPrefix);
-                uploadKeysSw.Stop();
-
-                var keysTempTable = $"__tmp_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-                var deleteMetrics = await fabricLoader!.SoftDeleteMissingRowsAsync(
-                    targetSchema: targetSchema,
-                    targetTable: targetTable,
-                    sourceKeysTempTable: keysTempTable,
-                    primaryKeyColumns: pkColumns,
-                    expectedSourceKeyRowCount: keyWrite.RowCount,
-                    sourceKeysDfsUrl: keysDfsUrl,
-                    sourceKeysFileFormat: "csv.gz",
-                    subsetWhere: stream.DeleteDetection.Where,
-                    cleanup: envConfig.Cleanup,
-                    logPrefix: streamPrefix);
-
-                logger.LogInformation(
-                    "{LogPrefix} Delete detection ({Type}) stream {StreamName}: sourceKeys={SourceKeys}, subsetWhere={SubsetWhere}, keyWriteMs={KeyWriteMs:F0}, keyUploadMs={KeyUploadMs:F0}, keyCopyMs={KeyCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
-                    streamPrefix,
-                    stream.DeleteDetection.Type,
-                    stream.Name,
-                    keyWrite.RowCount,
-                    string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where,
-                    writeKeysSw.Elapsed.TotalMilliseconds,
-                    uploadKeysSw.Elapsed.TotalMilliseconds,
-                    deleteMetrics.CopyIntoElapsed.TotalMilliseconds,
-                    deleteMetrics.SoftDeleteElapsed.TotalMilliseconds,
-                    deleteMetrics.AffectedRows);
-
-                if (envConfig.Cleanup.DeleteLocalTempFiles)
-                    TryDeleteLocalTempFileAndDirectory(keysLocalPath, logger, streamPrefix);
-                if (envConfig.Cleanup.DeleteStagedFiles)
-                    await uploader.TryDeleteAsync(keysFileName, streamPrefix);
-            }
-            else
-            {
-                var keysTempTable = $"__tmp_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-                var deleteMetrics = await sqlServerLoader!.SoftDeleteMissingRowsAsync(
-                    targetSchema: targetSchema,
-                    targetTable: targetTable,
-                    sourceKeysTempTable: keysTempTable,
-                    primaryKeyColumns: pkColumns,
-                    sourceKeys: keyStream,
-                    subsetWhere: stream.DeleteDetection.Where,
-                    cleanup: envConfig.Cleanup,
-                    logPrefix: streamPrefix);
-
-                logger.LogInformation(
-                    "{LogPrefix} Delete detection ({Type}) stream {StreamName}: sourceKeys={SourceKeys}, subsetWhere={SubsetWhere}, keyBulkCopyMs={KeyBulkCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
-                    streamPrefix,
-                    stream.DeleteDetection.Type,
-                    stream.Name,
-                    deleteMetrics.SourceKeysCopied,
-                    string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where,
-                    deleteMetrics.BulkCopyElapsed.TotalMilliseconds,
-                    deleteMetrics.SoftDeleteElapsed.TotalMilliseconds,
-                    deleteMetrics.AffectedRows);
-            }
+            await ProcessDeleteDetection(stream, envConfig, csvWriter, logger, streamPrefix, destinationType, sourceChunkReader, uploader, fabricLoader, sqlServerLoader, targetSchema, targetTable, sourceColumns);
         }
         else if (!runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
         {
@@ -629,6 +404,236 @@ public static class Program
         }
 
         logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
+    }
+
+    private static async Task ProcessDeleteDetection(ResolvedStreamConfig stream, EnvironmentConfig envConfig, CsvGzipWriter csvWriter, ILogger logger, string streamPrefix, string destinationType, SourceChunkReader sourceChunkReader, OneLakeUploader uploader, WarehouseLoader fabricLoader, SqlServerDestinationLoader sqlServerLoader, string targetSchema, string targetTable, List<SourceColumn> sourceColumns)
+    {
+        var pkColumns = stream.PrimaryKey
+            .Select(pk => sourceColumns.Single(c => c.Name.Equals(pk, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+        var keyStream = sourceChunkReader.ReadColumnsAsync(stream.SourceSql, stream.PrimaryKey, stream.DeleteDetection.Where, streamPrefix);
+
+        if (destinationType == "fabricWarehouse")
+        {
+            var deleteRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
+            var keysFileName = $"{stream.Name}/run={deleteRunId}/delete-keys.csv.gz";
+            var keysLocalPath = Path.Combine(Path.GetTempPath(), "fabric-incr-repl", Guid.NewGuid().ToString("N"), "delete-keys.csv.gz");
+            Directory.CreateDirectory(Path.GetDirectoryName(keysLocalPath)!);
+            logger.LogDebug("{LogPrefix} Delete detection keys local staging path: {LocalPath}", streamPrefix, keysLocalPath);
+
+            var writeKeysSw = System.Diagnostics.Stopwatch.StartNew();
+            var keyWrite = await csvWriter.WriteCsvGzAsync(keysLocalPath, pkColumns, keyStream);
+            writeKeysSw.Stop();
+            logger.LogDebug(
+                "{LogPrefix} Delete detection keys file write finished. Rows={RowCount}, ElapsedMs={ElapsedMs:F0}",
+                streamPrefix,
+                keyWrite.RowCount,
+                writeKeysSw.Elapsed.TotalMilliseconds);
+
+            var uploadKeysSw = System.Diagnostics.Stopwatch.StartNew();
+            var keysDfsUrl = await uploader!.UploadAsync(keysLocalPath, keysFileName, streamPrefix);
+            uploadKeysSw.Stop();
+
+            var keysTempTable = $"__tmp_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
+            var deleteMetrics = await fabricLoader!.SoftDeleteMissingRowsAsync(
+                targetSchema: targetSchema,
+                targetTable: targetTable,
+                sourceKeysTempTable: keysTempTable,
+                primaryKeyColumns: pkColumns,
+                expectedSourceKeyRowCount: keyWrite.RowCount,
+                sourceKeysDfsUrl: keysDfsUrl,
+                sourceKeysFileFormat: "csv.gz",
+                subsetWhere: stream.DeleteDetection.Where,
+                cleanup: envConfig.Cleanup,
+                logPrefix: streamPrefix);
+
+            logger.LogInformation(
+                "{LogPrefix} Delete detection ({Type}) stream {StreamName}: sourceKeys={SourceKeys}, subsetWhere={SubsetWhere}, keyWriteMs={KeyWriteMs:F0}, keyUploadMs={KeyUploadMs:F0}, keyCopyMs={KeyCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
+                streamPrefix,
+                stream.DeleteDetection.Type,
+                stream.Name,
+                keyWrite.RowCount,
+                string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where,
+                writeKeysSw.Elapsed.TotalMilliseconds,
+                uploadKeysSw.Elapsed.TotalMilliseconds,
+                deleteMetrics.CopyIntoElapsed.TotalMilliseconds,
+                deleteMetrics.SoftDeleteElapsed.TotalMilliseconds,
+                deleteMetrics.AffectedRows);
+
+            if (envConfig.Cleanup.DeleteLocalTempFiles)
+                TryDeleteLocalTempFileAndDirectory(keysLocalPath, logger, streamPrefix);
+            if (envConfig.Cleanup.DeleteStagedFiles)
+                await uploader.TryDeleteAsync(keysFileName, streamPrefix);
+        }
+        else
+        {
+            var keysTempTable = $"__tmp_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
+            var deleteMetrics = await sqlServerLoader!.SoftDeleteMissingRowsAsync(
+                targetSchema: targetSchema,
+                targetTable: targetTable,
+                sourceKeysTempTable: keysTempTable,
+                primaryKeyColumns: pkColumns,
+                sourceKeys: keyStream,
+                subsetWhere: stream.DeleteDetection.Where,
+                cleanup: envConfig.Cleanup,
+                logPrefix: streamPrefix);
+
+            logger.LogInformation(
+                "{LogPrefix} Delete detection ({Type}) stream {StreamName}: sourceKeys={SourceKeys}, subsetWhere={SubsetWhere}, keyBulkCopyMs={KeyBulkCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
+                streamPrefix,
+                stream.DeleteDetection.Type,
+                stream.Name,
+                deleteMetrics.SourceKeysCopied,
+                string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where,
+                deleteMetrics.BulkCopyElapsed.TotalMilliseconds,
+                deleteMetrics.SoftDeleteElapsed.TotalMilliseconds,
+                deleteMetrics.AffectedRows);
+        }
+    }
+
+    private static async Task ProcessPreparedChunkAsync(PreparedChunk prepared, ResolvedStreamConfig stream, EnvironmentConfig envConfig, ILogger logger, string? destinationType, string? stagingFileFormat, OneLakeUploader? uploader, WarehouseLoader? fabricLoader, SqlServerDestinationLoader? sqlServerLoader, string? targetSchema, string? targetTable, List<SourceColumn>? sourceColumns, object? srcMax, ChunkInterval? chunkInterval)
+    {
+        var chunkPrefix = ChunkLogPrefix(prepared.ChunkIndex, stream);
+        if (destinationType == "fabricWarehouse")
+        {
+            var uploadSw = System.Diagnostics.Stopwatch.StartNew();
+            var oneLakePath = await uploader!.UploadAsync(prepared.LocalPath!, prepared.FileName!, chunkPrefix);
+            uploadSw.Stop();
+            var uploadedFileSizeKb = new FileInfo(prepared.LocalPath!).Length / 1024d;
+
+            var tempTable = $"__tmp_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
+            var warehouseMetrics = await fabricLoader!.LoadAndMergeAsync(
+                targetSchema: targetSchema,
+                targetTable: targetTable,
+                tempTable: tempTable,
+                columns: sourceColumns,
+                primaryKey: stream.PrimaryKey,
+                expectedRowCount: prepared.RowCount,
+                oneLakeDfsUrl: oneLakePath,
+                stagingFileFormat: stagingFileFormat,
+                cleanup: envConfig.Cleanup,
+                logPrefix: chunkPrefix
+            );
+
+            var totalSeconds =
+                prepared.WriteElapsed.TotalSeconds +
+                uploadSw.Elapsed.TotalSeconds +
+                warehouseMetrics.CopyIntoElapsed.TotalSeconds +
+                warehouseMetrics.MergeElapsed.TotalSeconds;
+            var rowsPerSecond = totalSeconds > 0
+                ? prepared.RowCount / totalSeconds
+                : 0d;
+
+            if (chunkInterval is null)
+            {
+                logger.LogInformation(
+                    "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, maxInclusive={MaxInclusive}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                    chunkPrefix,
+                    prepared.ChunkIndex,
+                    prepared.RowCount,
+                    prepared.LowerBound,
+                    srcMax,
+                    uploadedFileSizeKb,
+                    prepared.WriteElapsed.TotalMilliseconds,
+                    uploadSw.Elapsed.TotalMilliseconds,
+                    warehouseMetrics.CopyIntoElapsed.TotalMilliseconds,
+                    warehouseMetrics.MergeElapsed.TotalMilliseconds,
+                    rowsPerSecond);
+            }
+            else
+            {
+                logger.LogInformation(
+                    "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                    chunkPrefix,
+                    prepared.ChunkIndex,
+                    prepared.RowCount,
+                    prepared.LowerBound,
+                    prepared.UpperBound,
+                    uploadedFileSizeKb,
+                    prepared.WriteElapsed.TotalMilliseconds,
+                    uploadSw.Elapsed.TotalMilliseconds,
+                    warehouseMetrics.CopyIntoElapsed.TotalMilliseconds,
+                    warehouseMetrics.MergeElapsed.TotalMilliseconds,
+                    rowsPerSecond);
+            }
+
+            if (envConfig.Cleanup.DeleteLocalTempFiles)
+                TryDeleteLocalTempFileAndDirectory(prepared.LocalPath!, logger, chunkPrefix);
+
+            if (envConfig.Cleanup.DeleteStagedFiles)
+                await uploader.TryDeleteAsync(prepared.FileName!, chunkPrefix);
+        }
+        else
+        {
+            var tempTable = $"__tmp_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
+            SqlServerDestinationChunkMetrics sqlMetrics;
+            if (prepared.LocalPath is not null && prepared.RowStream is null)
+            {
+                sqlMetrics = await sqlServerLoader!.LoadAndMergeFromCsvAsync(
+                    targetSchema: targetSchema,
+                    targetTable: targetTable,
+                    tempTable: tempTable,
+                    columns: sourceColumns,
+                    primaryKey: stream.PrimaryKey,
+                    csvPath: prepared.LocalPath,
+                    expectedRowCount: prepared.RowCount,
+                    cleanup: envConfig.Cleanup,
+                    logPrefix: chunkPrefix);
+            }
+            else
+            {
+                sqlMetrics = await sqlServerLoader!.LoadAndMergeAsync(
+                    targetSchema: targetSchema,
+                    targetTable: targetTable,
+                    tempTable: tempTable,
+                    columns: sourceColumns,
+                    primaryKey: stream.PrimaryKey,
+                    rows: prepared.RowStream!,
+                    cleanup: envConfig.Cleanup,
+                    logPrefix: chunkPrefix);
+            }
+
+            var totalSeconds =
+                prepared.WriteElapsed.TotalSeconds +
+                sqlMetrics.BulkCopyElapsed.TotalSeconds +
+                sqlMetrics.MergeElapsed.TotalSeconds;
+            var effectiveRowCount = sqlMetrics.RowsCopied;
+            var rowsPerSecond = totalSeconds > 0
+                ? effectiveRowCount / totalSeconds
+                : 0d;
+
+            if (chunkInterval is null)
+            {
+                logger.LogInformation(
+                    "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, maxInclusive={MaxInclusive}, materializeMs={MaterializeMs:F0}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                    chunkPrefix,
+                    prepared.ChunkIndex,
+                    effectiveRowCount,
+                    prepared.LowerBound,
+                    srcMax,
+                    prepared.WriteElapsed.TotalMilliseconds,
+                    sqlMetrics.BulkCopyElapsed.TotalMilliseconds,
+                    sqlMetrics.MergeElapsed.TotalMilliseconds,
+                    rowsPerSecond);
+            }
+            else
+            {
+                logger.LogInformation(
+                    "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, preLoadMs={PreLoadMs:F0}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                    chunkPrefix,
+                    prepared.ChunkIndex,
+                    effectiveRowCount,
+                    prepared.LowerBound,
+                    prepared.UpperBound,
+                    prepared.WriteElapsed.TotalMilliseconds,
+                    sqlMetrics.BulkCopyElapsed.TotalMilliseconds,
+                    sqlMetrics.MergeElapsed.TotalMilliseconds,
+                    rowsPerSecond);
+            }
+
+            if (envConfig.Cleanup.DeleteLocalTempFiles && prepared.LocalPath is not null)
+                TryDeleteLocalTempFileAndDirectory(prepared.LocalPath, logger, chunkPrefix);
+        }
     }
 
     private static async Task EnsureTargetTable(ResolvedStreamConfig stream, string streamPrefix, string destinationType, WarehouseSchemaManager fabricSchemaManager, SqlServerDestinationSchemaManager sqlServerSchemaManager, string targetSchema, string targetTable, List<SourceColumn> sourceColumns)
