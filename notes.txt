@@ -59,3 +59,7 @@ kind of MERGE for upsert as the fabric destination.
 We might add other methods than SqlBulkCopy later, so be prepared for that.
 
 We will also add other types of destinations later, for example Databricks, Big Query, and Snowflake but focus on just onprem sql server now.
+
+
+There are many more variables that can be handled this way.
+For exemple: streams, resolvedStreams, envConfig, destinationConnections, runDeleteDetection, failFast, csvWriter, parquetWriter

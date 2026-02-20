@@ -14,6 +14,28 @@ namespace Pluck;
 
 public static class Program
 {
+    private const string AppPrefix = "[app]";
+    private static ILogger? s_logger;
+    private static string s_tempPath = Path.GetTempPath();
+    private static StreamsConfig? s_streams;
+    private static List<ResolvedStreamConfig>? s_resolvedStreams;
+    private static EnvironmentConfig? s_envConfig;
+    private static Dictionary<string, DestinationConnectionConfig>? s_destinationConnections;
+    private static bool s_runDeleteDetection;
+    private static bool s_failFast;
+    private static CsvGzipWriter? s_csvWriter;
+    private static ParquetChunkWriter? s_parquetWriter;
+    private static ILogger Logger => s_logger ?? throw new InvalidOperationException("Logger has not been initialized.");
+    private static string TempPath => s_tempPath;
+    private static StreamsConfig Streams => s_streams ?? throw new InvalidOperationException("Streams config has not been initialized.");
+    private static List<ResolvedStreamConfig> ResolvedStreams => s_resolvedStreams ?? throw new InvalidOperationException("Resolved streams have not been initialized.");
+    private static EnvironmentConfig EnvConfig => s_envConfig ?? throw new InvalidOperationException("Environment config has not been initialized.");
+    private static Dictionary<string, DestinationConnectionConfig> DestinationConnections => s_destinationConnections ?? throw new InvalidOperationException("Destination connections have not been initialized.");
+    private static bool RunDeleteDetection => s_runDeleteDetection;
+    private static bool FailFast => s_failFast;
+    private static CsvGzipWriter CsvWriter => s_csvWriter ?? throw new InvalidOperationException("Csv writer has not been initialized.");
+    private static ParquetChunkWriter ParquetWriter => s_parquetWriter ?? throw new InvalidOperationException("Parquet writer has not been initialized.");
+
     public static async Task<int> Main(string[] args)
     {
         return await RunApplicationAsync(args);
@@ -34,7 +56,6 @@ public static class Program
             return 0;
         }
 
-        const string appPrefix = "[app]";
         // Configure logging
         var traceFlag = parsedArgs.Trace;
         var debugFlag = parsedArgs.Debug;
@@ -57,7 +78,7 @@ public static class Program
             builder.SetMinimumLevel(minLogLevel);
         });
 
-        var logger = loggerFactory.CreateLogger("App");
+        s_logger = loggerFactory.CreateLogger("App");
 
         try
         {
@@ -66,9 +87,9 @@ public static class Program
             var streamsPathArg = parsedArgs.StreamsFile;
             var streamsFilterArg = parsedArgs.Streams;
             var streamsPath = streamsPathArg ?? "streams.yaml";
-            var tempPath = parsedArgs.TempPath ?? Path.GetTempPath();
-            logger.LogInformation("{LogPrefix} Selected environment: {Environment}", appPrefix, env);
-            logger.LogInformation("{LogPrefix} Temp path for local files: {TempPath}", appPrefix, tempPath);
+            s_tempPath = parsedArgs.TempPath ?? Path.GetTempPath();
+            Logger.LogInformation("{LogPrefix} Selected environment: {Environment}", AppPrefix, env);
+            Logger.LogInformation("{LogPrefix} Temp path for local files: {TempPath}", AppPrefix, TempPath);
 
             var loader = new YamlLoader();
             var connectionsRoot = loader.Load<ConnectionsRoot>(connectionsPath);
@@ -83,86 +104,67 @@ public static class Program
                 throw new Exception($"Environment '{env}' must define at least one destination under 'destinationConnections' in {connectionsPath}.");
 
             var testConnectionsFlag = parsedArgs.TestConnections;
-            var runDeleteDetection = parsedArgs.DeleteDetection;
-            var failFast = parsedArgs.FailFast;
+            s_runDeleteDetection = parsedArgs.DeleteDetection;
+            s_failFast = parsedArgs.FailFast;
 
-            var csvWriter = new CsvGzipWriter();
-            var parquetWriter = new ParquetChunkWriter();
+            s_csvWriter = new CsvGzipWriter();
+            s_parquetWriter = new ParquetChunkWriter();
+            s_streams = streams;
+            s_envConfig = envConfig;
+            s_destinationConnections = destinationConnections;
 
             if (testConnectionsFlag)
-                return await RunConnectionTestsAsync(envConfig, destinationConnections, logger, appPrefix);
+                return await RunConnectionTestsAsync();
 
-            var resolvedStreams = ResolveStreams(streams, destinationConnections, streamsFilterArg, logger, appPrefix);
+            s_resolvedStreams = ResolveStreams(streamsFilterArg);
 
-            return await ExecuteReplicationAsync(
-                streams,
-                resolvedStreams,
-                envConfig,
-                destinationConnections,
-                runDeleteDetection,
-                failFast,
-                csvWriter,
-                parquetWriter,
-                tempPath,
-                logger,
-                appPrefix);
+            return await ExecuteReplicationAsync();
         }
         catch (SqlException ex)
         {
             // SQL errors: concise output without stack trace.
-            logger.LogError("{LogPrefix} {ExceptionType}: {Message}", appPrefix, ex.GetType().Name, ex.Message);
+            Logger.LogError("{LogPrefix} {ExceptionType}: {Message}", AppPrefix, ex.GetType().Name, ex.Message);
             return 1;
         }
         catch (Exception ex)
         {
             // Non-SQL errors: full stack trace.
-            logger.LogError(ex, "{LogPrefix} Unhandled exception during replication run.", appPrefix);
+            Logger.LogError(ex, "{LogPrefix} Unhandled exception during replication run.", AppPrefix);
             return 1;
         }
     }
 
-    private static async Task<int> ExecuteReplicationAsync(
-        StreamsConfig streams,
-        List<ResolvedStreamConfig> resolvedStreams,
-        EnvironmentConfig envConfig,
-        Dictionary<string, DestinationConnectionConfig> destinationConnections,
-        bool runDeleteDetection,
-        bool failFast,
-        CsvGzipWriter csvWriter,
-        ParquetChunkWriter parquetWriter,
-        string tempPath,
-        ILogger logger,
-        string appPrefix)
+    private static async Task<int> ExecuteReplicationAsync()
     {
-        foreach (var stream in resolvedStreams)
-            LogResolvedStreamConfig(stream, logger);
+        foreach (var stream in ResolvedStreams)
+            LogResolvedStreamConfig(stream);
 
-        var maxParallelStreams = streams.GetMaxParallelStreams();
-        logger.LogInformation(
+        var maxParallelStreams = Streams.GetMaxParallelStreams();
+        Logger.LogInformation(
             "{LogPrefix} Stream execution mode: maxParallelStreams={MaxParallelStreams}, streamCount={StreamCount}",
-            appPrefix,
+            AppPrefix,
             maxParallelStreams,
-            resolvedStreams.Count);
-        logger.LogInformation(
+            ResolvedStreams.Count);
+        Logger.LogInformation(
             "{LogPrefix} Delete detection runtime switch (--delete_detection): {Enabled}",
-            appPrefix,
-            runDeleteDetection);
-        logger.LogInformation(
+            AppPrefix,
+            RunDeleteDetection);
+        Logger.LogInformation(
             "{LogPrefix} Fail-fast runtime switch (--failfast): {Enabled}",
-            appPrefix,
-            failFast);
+            AppPrefix,
+            FailFast);
 
         var failedStreams = new ConcurrentBag<string>();
         using var failFastCts = new CancellationTokenSource();
 
         if (maxParallelStreams <= 1)
         {
-            foreach (var stream in resolvedStreams)
+            foreach (var stream in ResolvedStreams)
             {
                 if (failFastCts.IsCancellationRequested)
                     break;
 
-                await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token, failFast, logger, appPrefix, failedStreams, failFastCts, envConfig, destinationConnections, runDeleteDetection, csvWriter, parquetWriter, tempPath);
+                await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token, failedStreams, failFastCts);
             }
         }
         else
@@ -170,17 +172,17 @@ public static class Program
             try
             {
                 await Parallel.ForEachAsync(
-                    resolvedStreams,
+                    ResolvedStreams,
                     new ParallelOptions
                     {
                         MaxDegreeOfParallelism = maxParallelStreams,
                         CancellationToken = failFastCts.Token
                     },
-                    async (stream, cancellationToken) => await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token, failFast, logger, appPrefix, failedStreams, failFastCts, envConfig, destinationConnections, runDeleteDetection, csvWriter, parquetWriter, tempPath));
+                    async (stream, cancellationToken) => await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token, failedStreams, failFastCts));
             }
-            catch (OperationCanceledException) when (failFast && failFastCts.IsCancellationRequested)
+            catch (OperationCanceledException) when (FailFast && failFastCts.IsCancellationRequested)
             {
-                logger.LogInformation("{LogPrefix} Stream execution canceled due to --failfast.", appPrefix);
+                Logger.LogInformation("{LogPrefix} Stream execution canceled due to --failfast.", AppPrefix);
             }
         }
 
@@ -191,9 +193,9 @@ public static class Program
                 .OrderBy(name => name)
                 .ToList();
 
-            logger.LogError(
+            Logger.LogError(
                 "{LogPrefix} Replication run completed with failed streams ({FailedCount}): {FailedStreams}",
-                appPrefix,
+                AppPrefix,
                 failed.Count,
                 string.Join(", ", failed));
             return 1;
@@ -203,39 +205,39 @@ public static class Program
 
         }
 
-    private static async Task ProcessStreamAsync(ResolvedStreamConfig stream, EnvironmentConfig envConfig, Dictionary<string, DestinationConnectionConfig> destinationConnections, bool runDeleteDetection, CsvGzipWriter csvWriter, ParquetChunkWriter parquetWriter, string tempPath, ILogger logger, string appPrefix)
+    private static async Task ProcessStreamAsync(ResolvedStreamConfig stream)
     {
         var streamPrefix = $"[stream={stream.Name}]";
-        if (!envConfig.SourceConnections.TryGetValue(stream.SourceConnection, out var sourceCfg))
+        if (!EnvConfig.SourceConnections.TryGetValue(stream.SourceConnection, out var sourceCfg))
             throw new Exception(
                 $"Stream '{stream.Name}' references unknown sourceConnection '{stream.SourceConnection}'. " +
-                $"Defined sourceConnections: {string.Join(", ", envConfig.SourceConnections.Keys.OrderBy(x => x))}.");
-        if (!destinationConnections.TryGetValue(stream.DestinationConnection, out var destinationCfg))
+                $"Defined sourceConnections: {string.Join(", ", EnvConfig.SourceConnections.Keys.OrderBy(x => x))}.");
+        if (!DestinationConnections.TryGetValue(stream.DestinationConnection, out var destinationCfg))
             throw new Exception(
                 $"Stream '{stream.Name}' references unknown destinationConnection '{stream.DestinationConnection}'. " +
-                $"Defined destinationConnections: {string.Join(", ", destinationConnections.Keys.OrderBy(x => x))}.");
+                $"Defined destinationConnections: {string.Join(", ", DestinationConnections.Keys.OrderBy(x => x))}.");
         var destinationType = NormalizeDestinationType(destinationCfg.Type);
 
         var sourceSchemaReader = new SourceSchemaReader(
             sourceCfg.ConnectionString,
             sourceCfg.CommandTimeoutSeconds,
-            logger);
+            Logger);
         var sourceChunkReader = new SourceChunkReader(
             sourceCfg.ConnectionString,
             sourceCfg.CommandTimeoutSeconds,
-            logger);
+            Logger);
         var sourceCsb = new SqlConnectionStringBuilder(sourceCfg.ConnectionString);
-        logger.LogDebug(
+        Logger.LogDebug(
             "{LogPrefix} Source connection details: sourceConnection={SourceConnection}; server={Server}; database={Database}",
             streamPrefix,
             stream.SourceConnection,
             sourceCsb.DataSource,
             sourceCsb.InitialCatalog);
 
-        logger.LogInformation("{LogPrefix} === Stream: {StreamName} ===", streamPrefix, stream.Name);
+        Logger.LogInformation("{LogPrefix} === Stream: {StreamName} ===", streamPrefix, stream.Name);
         var stagingFileFormat = NormalizeStagingFileFormat(stream.StagingFileFormat);
-        logger.LogInformation("{LogPrefix} Stream staging file format: {StagingFileFormat}", streamPrefix, stagingFileFormat);
-        logger.LogInformation(
+        Logger.LogInformation("{LogPrefix} Stream staging file format: {StagingFileFormat}", streamPrefix, stagingFileFormat);
+        Logger.LogInformation(
             "{LogPrefix} Stream destination: destinationConnection={DestinationConnection}, destinationType={DestinationType}",
             streamPrefix,
             stream.DestinationConnection,
@@ -251,17 +253,17 @@ public static class Program
         if (destinationType == "fabricWarehouse")
         {
             var tokenProvider = new TokenProvider(destinationCfg.Auth);
-            uploader = new OneLakeUploader(destinationCfg.OneLakeStaging, tokenProvider, logger);
-            var warehouseConnFactory = new WarehouseConnectionFactory(destinationCfg.FabricWarehouse, tokenProvider, logger);
-            fabricSchemaManager = new WarehouseSchemaManager(warehouseConnFactory, logger);
-            fabricLoader = new WarehouseLoader(warehouseConnFactory, logger);
+            uploader = new OneLakeUploader(destinationCfg.OneLakeStaging, tokenProvider, Logger);
+            var warehouseConnFactory = new WarehouseConnectionFactory(destinationCfg.FabricWarehouse, tokenProvider, Logger);
+            fabricSchemaManager = new WarehouseSchemaManager(warehouseConnFactory, Logger);
+            fabricLoader = new WarehouseLoader(warehouseConnFactory, Logger);
             destinationDefaultSchema = destinationCfg.FabricWarehouse.TargetSchema;
         }
         else if (destinationType == "sqlServer")
         {
-            var sqlServerFactory = new SqlServerDestinationConnectionFactory(destinationCfg.SqlServer, logger);
-            sqlServerSchemaManager = new SqlServerDestinationSchemaManager(sqlServerFactory, logger);
-            sqlServerLoader = new SqlServerDestinationLoader(sqlServerFactory, logger);
+            var sqlServerFactory = new SqlServerDestinationConnectionFactory(destinationCfg.SqlServer, Logger);
+            sqlServerSchemaManager = new SqlServerDestinationSchemaManager(sqlServerFactory, Logger);
+            sqlServerLoader = new SqlServerDestinationLoader(sqlServerFactory, Logger);
             destinationDefaultSchema = destinationCfg.SqlServer.TargetSchema;
         }
         else
@@ -278,7 +280,7 @@ public static class Program
             stream.SqlServer.BufferChunksToCsvBeforeBulkCopy == true;
         if (destinationType == "sqlServer")
         {
-            logger.LogInformation(
+            Logger.LogInformation(
                 "{LogPrefix} SQL Server destination chunk buffering: bufferChunksToCsvBeforeBulkCopy={Enabled}",
                 streamPrefix,
                 sqlServerBufferChunksToCsv);
@@ -295,7 +297,7 @@ public static class Program
         }
         var excludedColumns = new HashSet<string>(stream.ExcludeColumns ?? new List<string>(), StringComparer.OrdinalIgnoreCase);
         if (excludedColumns.Count > 0)
-            logger.LogInformation("{LogPrefix} Excluded columns for stream {StreamName}: {ExcludedColumns}", streamPrefix, stream.Name, string.Join(", ", excludedColumns));
+            Logger.LogInformation("{LogPrefix} Excluded columns for stream {StreamName}: {ExcludedColumns}", streamPrefix, stream.Name, string.Join(", ", excludedColumns));
         if (excludedColumns.Contains(stream.UpdateKey))
             throw new Exception($"Stream '{stream.Name}' excludes updateKey column '{stream.UpdateKey}', which is not allowed.");
 
@@ -319,12 +321,6 @@ public static class Program
         {
             var (ok, ctVersionToPersist) = await ProcessChangeTrackingMaybe(
                 stream,
-                envConfig,
-                runDeleteDetection,
-                csvWriter,
-                parquetWriter,
-                logger,
-                appPrefix,
                 streamPrefix,
                 destinationType,
                 sourceChunkReader,
@@ -334,8 +330,7 @@ public static class Program
                 sqlServerLoader,
                 targetSchema,
                 targetTable,
-                sourceColumns,
-                tempPath);
+                sourceColumns);
             ctVersionToPersistAfterStandard = ctVersionToPersist;
             if (ok)
             {
@@ -348,11 +343,11 @@ public static class Program
         object? targetMax = destinationType == "fabricWarehouse"
             ? await fabricLoader!.GetMaxUpdateKeyAsync(targetSchema, targetTable, stream.UpdateKey, streamPrefix)
             : await sqlServerLoader!.GetMaxUpdateKeyAsync(targetSchema, targetTable, stream.UpdateKey, streamPrefix);
-        logger.LogInformation("{LogPrefix} Target watermark (max {UpdateKey}) = {TargetMax}", streamPrefix, stream.UpdateKey, FormatLogValue(targetMax));
+        Logger.LogInformation("{LogPrefix} Target watermark (max {UpdateKey}) = {TargetMax}", streamPrefix, stream.UpdateKey, FormatLogValue(targetMax));
 
         // 4) Optional logging: source min/max after watermark
         var (srcMin, srcMax) = await sourceChunkReader.GetMinMaxUpdateKeyAsync(stream.SourceSql, stream.UpdateKey, targetMax, streamPrefix);
-        logger.LogInformation(
+        Logger.LogInformation(
             "{LogPrefix} Source range after watermark: min={SourceMin}, max={SourceMax}",
             streamPrefix,
             FormatLogValue(srcMin),
@@ -363,7 +358,7 @@ public static class Program
         if (srcMin is not null && srcMax is not null)
         {
             var chunkInterval = ParseChunkInterval(stream.ChunkSize, stream.Name);
-            Task<PreparedChunk?>? prepareNextTask = PrepareNextChunkAsync(srcMin, chunkIndex + 1, envConfig, csvWriter, parquetWriter, logger, stream, destinationType, sourceChunkReader, stagingFileFormat, sqlServerBufferChunksToCsv, sourceColumns, srcMax, chunkInterval, tempPath);
+            Task<PreparedChunk?>? prepareNextTask = PrepareNextChunkAsync(srcMin, chunkIndex + 1, stream, destinationType, sourceChunkReader, stagingFileFormat, sqlServerBufferChunksToCsv, sourceColumns, srcMax, chunkInterval);
 
             while (prepareNextTask is not null)
             {
@@ -372,25 +367,25 @@ public static class Program
                     break;
 
                 prepareNextTask = prepared.NextLowerBound is not null
-                    ? PrepareNextChunkAsync(prepared.NextLowerBound, prepared.ChunkIndex + 1, envConfig, csvWriter, parquetWriter, logger, stream, destinationType, sourceChunkReader, stagingFileFormat, sqlServerBufferChunksToCsv, sourceColumns, srcMax, chunkInterval, tempPath)
+                    ? PrepareNextChunkAsync(prepared.NextLowerBound, prepared.ChunkIndex + 1, stream, destinationType, sourceChunkReader, stagingFileFormat, sqlServerBufferChunksToCsv, sourceColumns, srcMax, chunkInterval)
                     : null;
 
-                await ProcessPreparedChunkAsync(prepared, stream, envConfig, logger, destinationType, stagingFileFormat, uploader, fabricLoader, sqlServerLoader, targetSchema, targetTable, sourceColumns, srcMax, chunkInterval);
+                await ProcessPreparedChunkAsync(prepared, stream, destinationType, stagingFileFormat, uploader, fabricLoader, sqlServerLoader, targetSchema, targetTable, sourceColumns, srcMax, chunkInterval);
                 chunkIndex = prepared.ChunkIndex;
             }
         }
         else
         {
-            logger.LogInformation("{LogPrefix} No more rows.", streamPrefix);
+            Logger.LogInformation("{LogPrefix} No more rows.", streamPrefix);
         }
 
-        if (runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
+        if (RunDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
         {
-            await ProcessDeleteDetection(stream, envConfig, csvWriter, logger, streamPrefix, destinationType, sourceChunkReader, uploader, fabricLoader, sqlServerLoader, targetSchema, targetTable, sourceColumns, tempPath);
+            await ProcessDeleteDetection(stream, streamPrefix, destinationType, sourceChunkReader, uploader, fabricLoader, sqlServerLoader, targetSchema, targetTable, sourceColumns);
         }
-        else if (!runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
+        else if (!RunDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
         {
-            logger.LogInformation(
+            Logger.LogInformation(
                 "{LogPrefix} Delete detection configured but skipped because --delete_detection was not specified.",
                 streamPrefix);
         }
@@ -401,21 +396,18 @@ public static class Program
                 await fabricLoader!.UpsertStreamChangeTrackingVersionAsync(stream.Name, ctVersionToPersistAfterStandard.Value, streamPrefix);
             else
                 await sqlServerLoader!.UpsertStreamChangeTrackingVersionAsync(stream.Name, ctVersionToPersistAfterStandard.Value, streamPrefix);
-            logger.LogInformation(
+            Logger.LogInformation(
                 "{LogPrefix} Change tracking stream state initialized: stream={StreamName}, lastSyncVersion={Version}",
-                appPrefix,
+                AppPrefix,
                 stream.Name,
                 ctVersionToPersistAfterStandard.Value);
         }
 
-        logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
+        Logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
     }
 
     private static async Task ProcessDeleteDetection(
         ResolvedStreamConfig stream,
-        EnvironmentConfig envConfig,
-        CsvGzipWriter csvWriter,
-        ILogger logger,
         string streamPrefix,
         string destinationType,
         SourceChunkReader sourceChunkReader,
@@ -424,8 +416,7 @@ public static class Program
         SqlServerDestinationLoader? sqlServerLoader,
         string targetSchema,
         string targetTable,
-        List<SourceColumn> sourceColumns,
-        string tempPath)
+        List<SourceColumn> sourceColumns)
     {
         var pkColumns = stream.PrimaryKey
             .Select(pk => sourceColumns.Single(c => c.Name.Equals(pk, StringComparison.OrdinalIgnoreCase)))
@@ -436,14 +427,14 @@ public static class Program
         {
             var deleteRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
             var keysFileName = $"{stream.Name}/run={deleteRunId}/delete-keys.csv.gz";
-            var keysLocalPath = Path.Combine(tempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), "delete-keys.csv.gz");
+            var keysLocalPath = Path.Combine(TempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), "delete-keys.csv.gz");
             Directory.CreateDirectory(Path.GetDirectoryName(keysLocalPath)!);
-            logger.LogDebug("{LogPrefix} Delete detection keys local staging path: {LocalPath}", streamPrefix, keysLocalPath);
+            Logger.LogDebug("{LogPrefix} Delete detection keys local staging path: {LocalPath}", streamPrefix, keysLocalPath);
 
             var writeKeysSw = System.Diagnostics.Stopwatch.StartNew();
-            var keyWrite = await csvWriter.WriteCsvGzAsync(keysLocalPath, pkColumns, keyStream);
+            var keyWrite = await CsvWriter.WriteCsvGzAsync(keysLocalPath, pkColumns, keyStream);
             writeKeysSw.Stop();
-            logger.LogDebug(
+            Logger.LogDebug(
                 "{LogPrefix} Delete detection keys file write finished. Rows={RowCount}, ElapsedMs={ElapsedMs:F0}",
                 streamPrefix,
                 keyWrite.RowCount,
@@ -466,10 +457,10 @@ public static class Program
                 sourceKeysDfsUrl: keysDfsUrl,
                 sourceKeysFileFormat: "csv.gz",
                 subsetWhere: stream.DeleteDetection.Where,
-                cleanup: envConfig.Cleanup,
+                cleanup: EnvConfig.Cleanup,
                 logPrefix: streamPrefix);
 
-            logger.LogInformation(
+            Logger.LogInformation(
                 "{LogPrefix} Delete detection ({Type}) stream {StreamName}: sourceKeys={SourceKeys}, subsetWhere={SubsetWhere}, keyWriteMs={KeyWriteMs:F0}, keyUploadMs={KeyUploadMs:F0}, keyCopyMs={KeyCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
                 streamPrefix,
                 stream.DeleteDetection.Type,
@@ -482,9 +473,9 @@ public static class Program
                 deleteMetrics.SoftDeleteElapsed.TotalMilliseconds,
                 deleteMetrics.AffectedRows);
 
-            if (envConfig.Cleanup.DeleteLocalTempFiles)
-                TryDeleteLocalTempFileAndDirectory(keysLocalPath, logger, streamPrefix);
-            if (envConfig.Cleanup.DeleteStagedFiles)
+            if (EnvConfig.Cleanup.DeleteLocalTempFiles)
+                TryDeleteLocalTempFileAndDirectory(keysLocalPath, Logger, streamPrefix);
+            if (EnvConfig.Cleanup.DeleteStagedFiles)
                 await uploader.TryDeleteAsync(keysFileName, streamPrefix);
         }
         else
@@ -500,10 +491,10 @@ public static class Program
                 primaryKeyColumns: pkColumns,
                 sourceKeys: keyStream,
                 subsetWhere: stream.DeleteDetection.Where,
-                cleanup: envConfig.Cleanup,
+                cleanup: EnvConfig.Cleanup,
                 logPrefix: streamPrefix);
 
-            logger.LogInformation(
+            Logger.LogInformation(
                 "{LogPrefix} Delete detection ({Type}) stream {StreamName}: sourceKeys={SourceKeys}, subsetWhere={SubsetWhere}, keyBulkCopyMs={KeyBulkCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
                 streamPrefix,
                 stream.DeleteDetection.Type,
@@ -519,8 +510,6 @@ public static class Program
     private static async Task ProcessPreparedChunkAsync(
         PreparedChunk prepared,
         ResolvedStreamConfig stream,
-        EnvironmentConfig envConfig,
-        ILogger logger,
         string destinationType,
         string stagingFileFormat,
         OneLakeUploader? uploader,
@@ -553,7 +542,7 @@ public static class Program
                 expectedRowCount: prepared.RowCount,
                 oneLakeDfsUrl: oneLakePath,
                 stagingFileFormat: stagingFileFormat,
-                cleanup: envConfig.Cleanup,
+                cleanup: EnvConfig.Cleanup,
                 logPrefix: chunkPrefix
             );
 
@@ -568,7 +557,7 @@ public static class Program
 
             if (chunkInterval is null)
             {
-                logger.LogInformation(
+                Logger.LogInformation(
                     "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, maxInclusive={MaxInclusive}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
                     chunkPrefix,
                     prepared.ChunkIndex,
@@ -584,7 +573,7 @@ public static class Program
             }
             else
             {
-                logger.LogInformation(
+                Logger.LogInformation(
                     "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, fileSizeKb={FileSizeKb:F1}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
                     chunkPrefix,
                     prepared.ChunkIndex,
@@ -599,10 +588,10 @@ public static class Program
                     rowsPerSecond);
             }
 
-            if (envConfig.Cleanup.DeleteLocalTempFiles)
-                TryDeleteLocalTempFileAndDirectory(prepared.LocalPath!, logger, chunkPrefix);
+            if (EnvConfig.Cleanup.DeleteLocalTempFiles)
+                TryDeleteLocalTempFileAndDirectory(prepared.LocalPath!, Logger, chunkPrefix);
 
-            if (envConfig.Cleanup.DeleteStagedFiles)
+            if (EnvConfig.Cleanup.DeleteStagedFiles)
                 await uploader.TryDeleteAsync(prepared.FileName!, chunkPrefix);
         }
         else
@@ -622,7 +611,7 @@ public static class Program
                     primaryKey: stream.PrimaryKey,
                     csvPath: prepared.LocalPath,
                     expectedRowCount: prepared.RowCount,
-                    cleanup: envConfig.Cleanup,
+                    cleanup: EnvConfig.Cleanup,
                     logPrefix: chunkPrefix);
             }
             else
@@ -634,7 +623,7 @@ public static class Program
                     columns: sourceColumns,
                     primaryKey: stream.PrimaryKey,
                     rows: prepared.RowStream!,
-                    cleanup: envConfig.Cleanup,
+                    cleanup: EnvConfig.Cleanup,
                     logPrefix: chunkPrefix);
             }
 
@@ -649,7 +638,7 @@ public static class Program
 
             if (chunkInterval is null)
             {
-                logger.LogInformation(
+                Logger.LogInformation(
                     "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, maxInclusive={MaxInclusive}, materializeMs={MaterializeMs:F0}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
                     chunkPrefix,
                     prepared.ChunkIndex,
@@ -663,7 +652,7 @@ public static class Program
             }
             else
             {
-                logger.LogInformation(
+                Logger.LogInformation(
                     "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, preLoadMs={PreLoadMs:F0}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
                     chunkPrefix,
                     prepared.ChunkIndex,
@@ -676,8 +665,8 @@ public static class Program
                     rowsPerSecond);
             }
 
-            if (envConfig.Cleanup.DeleteLocalTempFiles && prepared.LocalPath is not null)
-                TryDeleteLocalTempFileAndDirectory(prepared.LocalPath, logger, chunkPrefix);
+            if (EnvConfig.Cleanup.DeleteLocalTempFiles && prepared.LocalPath is not null)
+                TryDeleteLocalTempFileAndDirectory(prepared.LocalPath, Logger, chunkPrefix);
         }
     }
 
@@ -721,12 +710,6 @@ public static class Program
     // Returns true if Change tracking was successful. False if fallback to standard sync is needed (first run with CT enabled, no prior state).
     private static async Task<(bool Handled, long? CtVersionToPersistAfterStandard)> ProcessChangeTrackingMaybe(
         ResolvedStreamConfig stream,
-        EnvironmentConfig envConfig,
-        bool runDeleteDetection,
-        CsvGzipWriter csvWriter,
-        ParquetChunkWriter parquetWriter,
-        ILogger logger,
-        string appPrefix,
         string streamPrefix,
         string destinationType,
         SourceChunkReader sourceChunkReader,
@@ -736,8 +719,7 @@ public static class Program
         SqlServerDestinationLoader? sqlServerLoader,
         string targetSchema,
         string targetTable,
-        List<SourceColumn> sourceColumns,
-        string tempPath)
+        List<SourceColumn> sourceColumns)
     {
         var ctSourceTable = stream.ChangeTracking.SourceTable!;
         var ctSyncToVersion = await sourceChunkReader.GetChangeTrackingCurrentVersionAsync(streamPrefix);
@@ -751,12 +733,6 @@ public static class Program
         {
             await ProcessChangeTracking(
                 stream,
-                envConfig,
-                runDeleteDetection,
-                csvWriter,
-                parquetWriter,
-                logger,
-                appPrefix,
                 streamPrefix,
                 destinationType,
                 sourceChunkReader,
@@ -769,14 +745,13 @@ public static class Program
                 sourceColumns,
                 ctSourceTable,
                 ctSyncToVersion.Value,
-                ctLastSyncVersion,
-                tempPath);
+                ctLastSyncVersion);
             return (true, null);
         }
 
-        logger.LogWarning(
+        Logger.LogWarning(
             "{LogPrefix} Change tracking enabled but no prior stream state exists. Falling back to standard sync for this run and initializing change tracking version afterward. stream={StreamName}, sourceTable={SourceTable}, initVersion={InitVersion}",
-            appPrefix,
+            AppPrefix,
             stream.Name,
             ctSourceTable,
             ctSyncToVersion.Value);
@@ -785,12 +760,6 @@ public static class Program
 
     private static async Task ProcessChangeTracking(
         ResolvedStreamConfig stream,
-        EnvironmentConfig envConfig,
-        bool runDeleteDetection,
-        CsvGzipWriter csvWriter,
-        ParquetChunkWriter parquetWriter,
-        ILogger logger,
-        string appPrefix,
         string streamPrefix,
         string destinationType,
         SourceChunkReader sourceChunkReader,
@@ -803,8 +772,7 @@ public static class Program
         List<SourceColumn> sourceColumns,
         string ctSourceTable,
         long ctSyncToVersion,
-        long ctLastSyncVersion,
-        string tempPath)
+        long ctLastSyncVersion)
     {
         var ctMinValidVersion = await sourceChunkReader.GetChangeTrackingMinValidVersionAsync(ctSourceTable, streamPrefix);
         if (ctMinValidVersion is null)
@@ -819,7 +787,7 @@ public static class Program
                 "A re-initialization run is required (remove stream state row and run a full/non-CT sync once).");
         }
 
-        logger.LogInformation(
+        Logger.LogInformation(
             "{LogPrefix} Change tracking mode enabled. sourceTable={SourceTable}, fromVersion={FromVersion}, toVersion={ToVersion}, minValidVersion={MinValidVersion}",
             streamPrefix,
             ctSourceTable,
@@ -837,10 +805,16 @@ public static class Program
                 throw new Exception("Fabric destination dependencies are not initialized.");
 
             // Upserts from CHANGETABLE (I/U) joined to current source rows.
-            var ext = stagingFileFormat == "parquet" ? "parquet" : (stagingFileFormat == "csv" ? "csv" : "csv.gz");
+            string ext;
+            if (stagingFileFormat == "parquet")
+                ext = "parquet";
+            else if (stagingFileFormat == "csv")
+                ext = "csv";
+            else
+                ext = "csv.gz";
             var upsertRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
             var upsertFileName = $"{stream.Name}/run={upsertRunId}/ct-upserts.{ext}";
-            var upsertLocalPath = Path.Combine(tempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"ct-upserts.{ext}");
+            var upsertLocalPath = Path.Combine(TempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"ct-upserts.{ext}");
             Directory.CreateDirectory(Path.GetDirectoryName(upsertLocalPath)!);
 
             var upsertRows = sourceChunkReader.ReadChangeTrackingUpsertsAsync(
@@ -852,11 +826,19 @@ public static class Program
                 ctSyncToVersion,
                 streamPrefix);
             var upsertWriteSw = System.Diagnostics.Stopwatch.StartNew();
-            var upsertWrite = stagingFileFormat == "parquet"
-                ? await parquetWriter.WriteParquetAsync(upsertLocalPath, sourceColumns, upsertRows)
-                : stagingFileFormat == "csv"
-                    ? await csvWriter.WriteCsvAsync(upsertLocalPath, sourceColumns, upsertRows)
-                    : await csvWriter.WriteCsvGzAsync(upsertLocalPath, sourceColumns, upsertRows);
+            ChunkWriteResult upsertWrite;
+            if (stagingFileFormat == "parquet")
+            {
+                upsertWrite = await ParquetWriter.WriteParquetAsync(upsertLocalPath, sourceColumns, upsertRows);
+            }
+            else if (stagingFileFormat == "csv")
+            {
+                upsertWrite = await CsvWriter.WriteCsvAsync(upsertLocalPath, sourceColumns, upsertRows);
+            }
+            else
+            {
+                upsertWrite = await CsvWriter.WriteCsvGzAsync(upsertLocalPath, sourceColumns, upsertRows);
+            }
             upsertWriteSw.Stop();
 
             if (upsertWrite.RowCount > 0)
@@ -875,11 +857,11 @@ public static class Program
                     expectedRowCount: upsertWrite.RowCount,
                     oneLakeDfsUrl: upsertsDfsUrl,
                     stagingFileFormat: stagingFileFormat,
-                    cleanup: envConfig.Cleanup,
+                    cleanup: EnvConfig.Cleanup,
                     logPrefix: streamPrefix
                 );
 
-                logger.LogInformation(
+                Logger.LogInformation(
                     "{LogPrefix} Change tracking upserts: rows={RowCount}, writeMs={WriteMs:F0}, uploadMs={UploadMs:F0}, copyIntoMs={CopyIntoMs:F0}, mergeMs={MergeMs:F0}",
                     streamPrefix,
                     upsertWrite.RowCount,
@@ -888,20 +870,20 @@ public static class Program
                     upsertMetrics.CopyIntoElapsed.TotalMilliseconds,
                     upsertMetrics.MergeElapsed.TotalMilliseconds);
 
-                if (envConfig.Cleanup.DeleteStagedFiles)
+                if (EnvConfig.Cleanup.DeleteStagedFiles)
                     await uploader.TryDeleteAsync(upsertFileName, streamPrefix);
             }
             else
             {
-                logger.LogInformation("{LogPrefix} Change tracking upserts: no changed insert/update rows.", streamPrefix);
+                Logger.LogInformation("{LogPrefix} Change tracking upserts: no changed insert/update rows.", streamPrefix);
             }
 
-            if (envConfig.Cleanup.DeleteLocalTempFiles)
-                TryDeleteLocalTempFileAndDirectory(upsertLocalPath, logger, streamPrefix);
+            if (EnvConfig.Cleanup.DeleteLocalTempFiles)
+                TryDeleteLocalTempFileAndDirectory(upsertLocalPath, Logger, streamPrefix);
 
             var deleteRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
             var deleteKeysFileName = $"{stream.Name}/run={deleteRunId}/ct-delete-keys.csv.gz";
-            var deleteKeysLocalPath = Path.Combine(tempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), "ct-delete-keys.csv.gz");
+            var deleteKeysLocalPath = Path.Combine(TempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), "ct-delete-keys.csv.gz");
             Directory.CreateDirectory(Path.GetDirectoryName(deleteKeysLocalPath)!);
 
             var deleteKeysRows = sourceChunkReader.ReadChangeTrackingDeletedKeysAsync(
@@ -911,7 +893,7 @@ public static class Program
                 ctSyncToVersion,
                 streamPrefix);
             var deleteWriteSw = System.Diagnostics.Stopwatch.StartNew();
-            var deleteKeyWrite = await csvWriter.WriteCsvGzAsync(deleteKeysLocalPath, pkColumns, deleteKeysRows);
+            var deleteKeyWrite = await CsvWriter.WriteCsvGzAsync(deleteKeysLocalPath, pkColumns, deleteKeysRows);
             deleteWriteSw.Stop();
 
             if (deleteKeyWrite.RowCount > 0)
@@ -929,10 +911,10 @@ public static class Program
                     expectedSourceKeyRowCount: deleteKeyWrite.RowCount,
                     sourceKeysDfsUrl: deleteKeysDfsUrl,
                     sourceKeysFileFormat: "csv.gz",
-                    cleanup: envConfig.Cleanup,
+                    cleanup: EnvConfig.Cleanup,
                     logPrefix: streamPrefix);
 
-                logger.LogInformation(
+                Logger.LogInformation(
                     "{LogPrefix} Change tracking deletes: sourceDeleteKeys={SourceDeleteKeys}, keyWriteMs={KeyWriteMs:F0}, keyUploadMs={KeyUploadMs:F0}, keyCopyMs={KeyCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
                     streamPrefix,
                     deleteKeyWrite.RowCount,
@@ -942,16 +924,16 @@ public static class Program
                     deleteMetrics.SoftDeleteElapsed.TotalMilliseconds,
                     deleteMetrics.AffectedRows);
 
-                if (envConfig.Cleanup.DeleteStagedFiles)
+                if (EnvConfig.Cleanup.DeleteStagedFiles)
                     await uploader.TryDeleteAsync(deleteKeysFileName, streamPrefix);
             }
             else
             {
-                logger.LogInformation("{LogPrefix} Change tracking deletes: no deleted rows.", streamPrefix);
+                Logger.LogInformation("{LogPrefix} Change tracking deletes: no deleted rows.", streamPrefix);
             }
 
-            if (envConfig.Cleanup.DeleteLocalTempFiles)
-                TryDeleteLocalTempFileAndDirectory(deleteKeysLocalPath, logger, streamPrefix);
+            if (EnvConfig.Cleanup.DeleteLocalTempFiles)
+                TryDeleteLocalTempFileAndDirectory(deleteKeysLocalPath, Logger, streamPrefix);
         }
         else
         {
@@ -973,12 +955,12 @@ public static class Program
                 columns: sourceColumns,
                 primaryKey: stream.PrimaryKey,
                 rows: upsertRows,
-                cleanup: envConfig.Cleanup,
+                cleanup: EnvConfig.Cleanup,
                 logPrefix: streamPrefix);
 
             if (upsertMetrics.RowsCopied > 0)
             {
-                logger.LogInformation(
+                Logger.LogInformation(
                     "{LogPrefix} Change tracking upserts: rows={RowCount}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}",
                     streamPrefix,
                     upsertMetrics.RowsCopied,
@@ -987,7 +969,7 @@ public static class Program
             }
             else
             {
-                logger.LogInformation("{LogPrefix} Change tracking upserts: no changed insert/update rows.", streamPrefix);
+                Logger.LogInformation("{LogPrefix} Change tracking upserts: no changed insert/update rows.", streamPrefix);
             }
 
             var deleteKeysRows = sourceChunkReader.ReadChangeTrackingDeletedKeysAsync(
@@ -1003,12 +985,12 @@ public static class Program
                 sourceKeysTempTable: deleteKeysTempTable,
                 primaryKeyColumns: pkColumns,
                 sourceKeys: deleteKeysRows,
-                cleanup: envConfig.Cleanup,
+                cleanup: EnvConfig.Cleanup,
                 logPrefix: streamPrefix);
 
             if (deleteMetrics.SourceKeysCopied > 0)
             {
-                logger.LogInformation(
+                Logger.LogInformation(
                     "{LogPrefix} Change tracking deletes: sourceDeleteKeys={SourceDeleteKeys}, bulkCopyMs={BulkCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
                     streamPrefix,
                     deleteMetrics.SourceKeysCopied,
@@ -1018,7 +1000,7 @@ public static class Program
             }
             else
             {
-                logger.LogInformation("{LogPrefix} Change tracking deletes: no deleted rows.", streamPrefix);
+                Logger.LogInformation("{LogPrefix} Change tracking deletes: no deleted rows.", streamPrefix);
             }
         }
 
@@ -1034,60 +1016,51 @@ public static class Program
                 throw new Exception("SQL Server destination loader is not initialized.");
             await sqlServerLoader.UpsertStreamChangeTrackingVersionAsync(stream.Name, ctSyncToVersion, streamPrefix);
         }
-        logger.LogInformation(
+        Logger.LogInformation(
             "{LogPrefix} Change tracking stream state updated: stream={StreamName}, lastSyncVersion={Version}",
-            appPrefix,
+            AppPrefix,
             stream.Name,
             ctSyncToVersion);
 
-        if (runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
+        if (RunDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
         {
-            logger.LogInformation(
+            Logger.LogInformation(
                 "{LogPrefix} Delete detection configured but skipped because change_tracking is enabled.",
                 streamPrefix);
         }
 
-        logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
+        Logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
     }
 
     private static async Task ExecuteStreamWithHandlingAsync(
         ResolvedStreamConfig stream,
         CancellationToken cancellationToken,
-        bool failFast,
-        ILogger logger,
-        string appPrefix,
         ConcurrentBag<string> failedStreams,
-        CancellationTokenSource failFastCts,
-        EnvironmentConfig envConfig,
-        Dictionary<string, DestinationConnectionConfig> destinationConnections,
-        bool runDeleteDetection,
-        CsvGzipWriter csvWriter,
-        ParquetChunkWriter parquetWriter,
-        string tempPath)
+        CancellationTokenSource failFastCts)
     {
         if (cancellationToken.IsCancellationRequested)
             return;
 
         try
         {
-            await ProcessStreamAsync(stream, envConfig, destinationConnections,  runDeleteDetection,  csvWriter,  parquetWriter, tempPath,  logger,  appPrefix);
+            await ProcessStreamAsync(stream);
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {
-            logger.LogWarning(
+            Logger.LogWarning(
                 "{LogPrefix} Stream execution canceled due to fail-fast cancellation.",
                 $"[stream={stream.Name}]");
         }
         catch (Exception ex)
         {
             failedStreams.Add(stream.Name);
-            logger.LogError(ex, "{LogPrefix} Stream failed.", $"[stream={stream.Name}]");
+            Logger.LogError(ex, "{LogPrefix} Stream failed.", $"[stream={stream.Name}]");
 
-            if (failFast && !failFastCts.IsCancellationRequested)
+            if (FailFast && !failFastCts.IsCancellationRequested)
             {
-                logger.LogError(
+                Logger.LogError(
                     "{LogPrefix} --failfast enabled; canceling remaining streams after failure in stream {StreamName}.",
-                    appPrefix,
+                    AppPrefix,
                     stream.Name);
                 failFastCts.Cancel();
             }
@@ -1099,10 +1072,6 @@ public static class Program
     private static async Task<PreparedChunk?> PrepareNextChunkAsync(
         object initialLowerBound,
         int nextChunkIndex,
-        EnvironmentConfig envConfig,
-        CsvGzipWriter csvWriter,
-        ParquetChunkWriter parquetWriter,
-        ILogger logger,
         ResolvedStreamConfig stream,
         string destinationType,
         SourceChunkReader sourceChunkReader,
@@ -1110,8 +1079,7 @@ public static class Program
         bool sqlServerBufferChunksToCsv,
         List<SourceColumn> sourceColumns,
         object srcMax,
-        ChunkInterval? chunkInterval,
-        string tempPath)
+        ChunkInterval? chunkInterval)
     {
         var lowerBound = initialLowerBound;
         while (CompareUpdateKey(lowerBound, srcMax) <= 0)
@@ -1137,27 +1105,41 @@ public static class Program
 
             if (destinationType == "fabricWarehouse")
             {
-                var ext = stagingFileFormat == "parquet" ? "parquet" : (stagingFileFormat == "csv" ? "csv" : "csv.gz");
+                string ext;
+                if (stagingFileFormat == "parquet")
+                    ext = "parquet";
+                else if (stagingFileFormat == "csv")
+                    ext = "csv";
+                else
+                    ext = "csv.gz";
                 var runId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
                 var fileName = $"{stream.Name}/run={runId}/chunk={nextChunkIndex:D6}.{ext}";
-                var localPath = Path.Combine(tempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"chunk.{ext}");
+                var localPath = Path.Combine(TempPath, "fabric-incr-repl", Guid.NewGuid().ToString("N"), $"chunk.{ext}");
                 Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
-                logger.LogDebug("{LogPrefix} Next chunk local staging path: {LocalPath}", chunkPrefix, localPath);
+                Logger.LogDebug("{LogPrefix} Next chunk local staging path: {LocalPath}", chunkPrefix, localPath);
 
                 var writeSw = System.Diagnostics.Stopwatch.StartNew();
-                var chunkWrite = stagingFileFormat == "parquet"
-                    ? await parquetWriter.WriteParquetAsync(localPath, sourceColumns, rowStream)
-                    : stagingFileFormat == "csv"
-                        ? await csvWriter.WriteCsvAsync(localPath, sourceColumns, rowStream)
-                        : await csvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream);
+                ChunkWriteResult chunkWrite;
+                if (stagingFileFormat == "parquet")
+                {
+                    chunkWrite = await ParquetWriter.WriteParquetAsync(localPath, sourceColumns, rowStream);
+                }
+                else if (stagingFileFormat == "csv")
+                {
+                    chunkWrite = await CsvWriter.WriteCsvAsync(localPath, sourceColumns, rowStream);
+                }
+                else
+                {
+                    chunkWrite = await CsvWriter.WriteCsvGzAsync(localPath, sourceColumns, rowStream);
+                }
                 writeSw.Stop();
-                logger.LogDebug("{LogPrefix} Local file written. Elapsed: {Elapsed}ms", chunkPrefix, writeSw.Elapsed.TotalMilliseconds);
+                Logger.LogDebug("{LogPrefix} Local file written. Elapsed: {Elapsed}ms", chunkPrefix, writeSw.Elapsed.TotalMilliseconds);
 
                 if (chunkWrite.RowCount == 0)
                 {
                     if (chunkInterval is null)
                     {
-                        logger.LogDebug(
+                        Logger.LogDebug(
                             "{LogPrefix} No rows in single-chunk range [{LowerBound}, {MaxInclusive}].",
                             chunkPrefix,
                             lowerBound,
@@ -1165,15 +1147,15 @@ public static class Program
                     }
                     else
                     {
-                        logger.LogDebug(
+                        Logger.LogDebug(
                             "{LogPrefix} No rows in interval chunk [{LowerBound}, {UpperBound}).",
                             chunkPrefix,
                             lowerBound,
                             upperBound);
                     }
 
-                    if (envConfig.Cleanup.DeleteLocalTempFiles)
-                        TryDeleteLocalTempFileAndDirectory(localPath, logger, chunkPrefix);
+                    if (EnvConfig.Cleanup.DeleteLocalTempFiles)
+                        TryDeleteLocalTempFileAndDirectory(localPath, Logger, chunkPrefix);
                     if (chunkInterval is null)
                         return null;
 
@@ -1196,20 +1178,20 @@ public static class Program
 
             if (destinationType == "sqlServer" && sqlServerBufferChunksToCsv)
             {
-                var localPath = Path.Combine(tempPath, "pluck-sqlserver-bulkcopy", Guid.NewGuid().ToString("N"), "chunk.csv");
+                var localPath = Path.Combine(TempPath, "pluck-sqlserver-bulkcopy", Guid.NewGuid().ToString("N"), "chunk.csv");
                 Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
-                logger.LogDebug("{LogPrefix} Next chunk local csv spool path: {LocalPath}", chunkPrefix, localPath);
+                Logger.LogDebug("{LogPrefix} Next chunk local csv spool path: {LocalPath}", chunkPrefix, localPath);
 
                 var writeSw = System.Diagnostics.Stopwatch.StartNew();
-                var chunkWrite = await csvWriter.WriteCsvAsync(localPath, sourceColumns, rowStream);
+                var chunkWrite = await CsvWriter.WriteCsvAsync(localPath, sourceColumns, rowStream);
                 writeSw.Stop();
-                logger.LogDebug("{LogPrefix} Chunk csv spool file written. Elapsed: {Elapsed}ms", chunkPrefix, writeSw.Elapsed.TotalMilliseconds);
+                Logger.LogDebug("{LogPrefix} Chunk csv spool file written. Elapsed: {Elapsed}ms", chunkPrefix, writeSw.Elapsed.TotalMilliseconds);
 
                 if (chunkWrite.RowCount == 0)
                 {
                     if (chunkInterval is null)
                     {
-                        logger.LogDebug(
+                        Logger.LogDebug(
                             "{LogPrefix} No rows in single-chunk range [{LowerBound}, {MaxInclusive}].",
                             chunkPrefix,
                             lowerBound,
@@ -1217,15 +1199,15 @@ public static class Program
                     }
                     else
                     {
-                        logger.LogDebug(
+                        Logger.LogDebug(
                             "{LogPrefix} No rows in interval chunk [{LowerBound}, {UpperBound}).",
                             chunkPrefix,
                             lowerBound,
                             upperBound);
                     }
 
-                    if (envConfig.Cleanup.DeleteLocalTempFiles)
-                        TryDeleteLocalTempFileAndDirectory(localPath, logger, chunkPrefix);
+                    if (EnvConfig.Cleanup.DeleteLocalTempFiles)
+                        TryDeleteLocalTempFileAndDirectory(localPath, Logger, chunkPrefix);
                     if (chunkInterval is null)
                         return null;
 
@@ -1262,30 +1244,26 @@ public static class Program
         return null;
     }
 
-    private static async Task<int> RunConnectionTestsAsync(
-        EnvironmentConfig envConfig,
-        Dictionary<string, DestinationConnectionConfig> destinationConnections,
-        ILogger logger,
-        string appPrefix)
+    private static async Task<int> RunConnectionTestsAsync()
     {
-        logger.LogInformation("{LogPrefix} Running connection tests...", appPrefix);
+        Logger.LogInformation("{LogPrefix} Running connection tests...", AppPrefix);
 
-        foreach (var (sourceName, sourceCfg) in envConfig.SourceConnections)
+        foreach (var (sourceName, sourceCfg) in EnvConfig.SourceConnections)
         {
             try
             {
                 await using var conn = new SqlConnection(sourceCfg.ConnectionString);
                 await conn.OpenAsync();
-                logger.LogInformation("{LogPrefix} Source SQL ({SourceConnection}): OK", appPrefix, sourceName);
+                Logger.LogInformation("{LogPrefix} Source SQL ({SourceConnection}): OK", AppPrefix, sourceName);
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "{LogPrefix} Source SQL ({SourceConnection}): FAILED", appPrefix, sourceName);
+                Logger.LogError(ex, "{LogPrefix} Source SQL ({SourceConnection}): FAILED", AppPrefix, sourceName);
                 return 2;
             }
         }
 
-        foreach (var (destinationName, destinationCfg) in destinationConnections)
+        foreach (var (destinationName, destinationCfg) in DestinationConnections)
         {
             var destinationType = NormalizeDestinationType(destinationCfg.Type);
             try
@@ -1293,14 +1271,14 @@ public static class Program
                 if (destinationType == "fabricWarehouse")
                 {
                     var tokenProvider = new TokenProvider(destinationCfg.Auth);
-                    using var conn = await new WarehouseConnectionFactory(destinationCfg.FabricWarehouse, tokenProvider, logger)
-                        .OpenAsync(logPrefix: appPrefix);
-                    await new OneLakeUploader(destinationCfg.OneLakeStaging, tokenProvider, logger).TestConnectionAsync();
+                    using var conn = await new WarehouseConnectionFactory(destinationCfg.FabricWarehouse, tokenProvider, Logger)
+                        .OpenAsync(logPrefix: AppPrefix);
+                    await new OneLakeUploader(destinationCfg.OneLakeStaging, tokenProvider, Logger).TestConnectionAsync();
                 }
                 else if (destinationType == "sqlServer")
                 {
-                    using var conn = await new SqlServerDestinationConnectionFactory(destinationCfg.SqlServer, logger)
-                        .OpenAsync(logPrefix: appPrefix);
+                    using var conn = await new SqlServerDestinationConnectionFactory(destinationCfg.SqlServer, Logger)
+                        .OpenAsync(logPrefix: AppPrefix);
                 }
                 else
                 {
@@ -1308,41 +1286,36 @@ public static class Program
                         $"Unsupported destination type '{destinationCfg.Type}' for destinationConnection '{destinationName}'. Supported values: fabricWarehouse, sqlServer.");
                 }
 
-                logger.LogInformation(
+                Logger.LogInformation(
                     "{LogPrefix} Destination ({DestinationConnection}, type={DestinationType}): OK",
-                    appPrefix,
+                    AppPrefix,
                     destinationName,
                     destinationType);
             }
             catch (Exception ex)
             {
-                logger.LogError(
+                Logger.LogError(
                     ex,
                     "{LogPrefix} Destination ({DestinationConnection}, type={DestinationType}): FAILED",
-                    appPrefix,
+                    AppPrefix,
                     destinationName,
                     destinationType);
                 return 3;
             }
         }
 
-        logger.LogInformation("{LogPrefix} All connection checks passed.", appPrefix);
+        Logger.LogInformation("{LogPrefix} All connection checks passed.", AppPrefix);
         return 0;
     }
 
-    private static List<ResolvedStreamConfig> ResolveStreams(
-        StreamsConfig streamsConfig,
-        Dictionary<string, DestinationConnectionConfig> destinationConnections,
-        string? streamsFilterArg,
-        ILogger logger,
-        string appPrefix)
+    private static List<ResolvedStreamConfig> ResolveStreams(string? streamsFilterArg)
     {
-        var resolvedStreams = streamsConfig.GetResolvedStreams();
+        var resolvedStreams = Streams.GetResolvedStreams();
         if (resolvedStreams.Any(s => string.IsNullOrWhiteSpace(s.DestinationConnection)))
         {
-            if (destinationConnections.Count == 1)
+            if (DestinationConnections.Count == 1)
             {
-                var implicitDestination = destinationConnections.Keys.Single();
+                var implicitDestination = DestinationConnections.Keys.Single();
                 foreach (var stream in resolvedStreams.Where(s => string.IsNullOrWhiteSpace(s.DestinationConnection)))
                     stream.DestinationConnection = implicitDestination;
             }
@@ -1376,17 +1349,17 @@ public static class Program
             .Where(s => requestedSet.Contains(s.Name))
             .ToList();
 
-        logger.LogInformation(
+        Logger.LogInformation(
             "{LogPrefix} Stream filter enabled (--streams): {Streams}",
-            appPrefix,
+            AppPrefix,
             string.Join(", ", requestedStreams));
         return resolvedStreams;
     }
 
-    private static void LogResolvedStreamConfig(ResolvedStreamConfig stream, ILogger logger)
+    private static void LogResolvedStreamConfig(ResolvedStreamConfig stream)
     {
         var streamPrefix = $"[stream={stream.Name}]";
-        logger.LogDebug(
+        Logger.LogDebug(
             "{LogPrefix} Resolved stream config: sourceConnection={SourceConnection}; destinationConnection={DestinationConnection}; sourceSql={SourceSql}; targetSchema={TargetSchema}; targetTable={TargetTable}; primaryKey=[{PrimaryKey}]; excludeColumns=[{ExcludeColumns}]; updateKey={UpdateKey}; chunkSize={ChunkSize}; stagingFileFormat={StagingFileFormat}; sqlServerBufferChunksToCsvBeforeBulkCopy={SqlServerBufferChunksToCsvBeforeBulkCopy}; sqlServerCreateClusteredColumnstoreOnCreate={SqlServerCreateClusteredColumnstoreOnCreate}; deleteDetectionType={DeleteDetectionType}; deleteDetectionWhere={DeleteDetectionWhere}; changeTrackingEnabled={ChangeTrackingEnabled}; changeTrackingSourceTable={ChangeTrackingSourceTable}",
             streamPrefix,
             stream.SourceConnection,
