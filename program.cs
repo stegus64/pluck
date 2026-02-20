@@ -406,7 +406,20 @@ public static class Program
         logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
     }
 
-    private static async Task ProcessDeleteDetection(ResolvedStreamConfig stream, EnvironmentConfig envConfig, CsvGzipWriter csvWriter, ILogger logger, string streamPrefix, string destinationType, SourceChunkReader sourceChunkReader, OneLakeUploader uploader, WarehouseLoader fabricLoader, SqlServerDestinationLoader sqlServerLoader, string targetSchema, string targetTable, List<SourceColumn> sourceColumns)
+    private static async Task ProcessDeleteDetection(
+        ResolvedStreamConfig stream,
+        EnvironmentConfig envConfig,
+        CsvGzipWriter csvWriter,
+        ILogger logger,
+        string streamPrefix,
+        string destinationType,
+        SourceChunkReader sourceChunkReader,
+        OneLakeUploader? uploader,
+        WarehouseLoader? fabricLoader,
+        SqlServerDestinationLoader? sqlServerLoader,
+        string targetSchema,
+        string targetTable,
+        List<SourceColumn> sourceColumns)
     {
         var pkColumns = stream.PrimaryKey
             .Select(pk => sourceColumns.Single(c => c.Name.Equals(pk, StringComparison.OrdinalIgnoreCase)))
@@ -430,12 +443,15 @@ public static class Program
                 keyWrite.RowCount,
                 writeKeysSw.Elapsed.TotalMilliseconds);
 
+            if (uploader is null || fabricLoader is null)
+                throw new Exception("Fabric destination dependencies are not initialized.");
+
             var uploadKeysSw = System.Diagnostics.Stopwatch.StartNew();
-            var keysDfsUrl = await uploader!.UploadAsync(keysLocalPath, keysFileName, streamPrefix);
+            var keysDfsUrl = await uploader.UploadAsync(keysLocalPath, keysFileName, streamPrefix);
             uploadKeysSw.Stop();
 
             var keysTempTable = $"__tmp_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-            var deleteMetrics = await fabricLoader!.SoftDeleteMissingRowsAsync(
+            var deleteMetrics = await fabricLoader.SoftDeleteMissingRowsAsync(
                 targetSchema: targetSchema,
                 targetTable: targetTable,
                 sourceKeysTempTable: keysTempTable,
@@ -468,7 +484,10 @@ public static class Program
         else
         {
             var keysTempTable = $"__tmp_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-            var deleteMetrics = await sqlServerLoader!.SoftDeleteMissingRowsAsync(
+            if (sqlServerLoader is null)
+                throw new Exception("SQL Server destination dependencies are not initialized.");
+
+            var deleteMetrics = await sqlServerLoader.SoftDeleteMissingRowsAsync(
                 targetSchema: targetSchema,
                 targetTable: targetTable,
                 sourceKeysTempTable: keysTempTable,
@@ -491,18 +510,35 @@ public static class Program
         }
     }
 
-    private static async Task ProcessPreparedChunkAsync(PreparedChunk prepared, ResolvedStreamConfig stream, EnvironmentConfig envConfig, ILogger logger, string? destinationType, string? stagingFileFormat, OneLakeUploader? uploader, WarehouseLoader? fabricLoader, SqlServerDestinationLoader? sqlServerLoader, string? targetSchema, string? targetTable, List<SourceColumn>? sourceColumns, object? srcMax, ChunkInterval? chunkInterval)
+    private static async Task ProcessPreparedChunkAsync(
+        PreparedChunk prepared,
+        ResolvedStreamConfig stream,
+        EnvironmentConfig envConfig,
+        ILogger logger,
+        string destinationType,
+        string stagingFileFormat,
+        OneLakeUploader? uploader,
+        WarehouseLoader? fabricLoader,
+        SqlServerDestinationLoader? sqlServerLoader,
+        string targetSchema,
+        string targetTable,
+        List<SourceColumn> sourceColumns,
+        object srcMax,
+        ChunkInterval? chunkInterval)
     {
         var chunkPrefix = ChunkLogPrefix(prepared.ChunkIndex, stream);
         if (destinationType == "fabricWarehouse")
         {
+            if (uploader is null || fabricLoader is null)
+                throw new Exception("Fabric destination dependencies are not initialized.");
+
             var uploadSw = System.Diagnostics.Stopwatch.StartNew();
-            var oneLakePath = await uploader!.UploadAsync(prepared.LocalPath!, prepared.FileName!, chunkPrefix);
+            var oneLakePath = await uploader.UploadAsync(prepared.LocalPath!, prepared.FileName!, chunkPrefix);
             uploadSw.Stop();
             var uploadedFileSizeKb = new FileInfo(prepared.LocalPath!).Length / 1024d;
 
             var tempTable = $"__tmp_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-            var warehouseMetrics = await fabricLoader!.LoadAndMergeAsync(
+            var warehouseMetrics = await fabricLoader.LoadAndMergeAsync(
                 targetSchema: targetSchema,
                 targetTable: targetTable,
                 tempTable: tempTable,
@@ -565,11 +601,14 @@ public static class Program
         }
         else
         {
+            if (sqlServerLoader is null)
+                throw new Exception("SQL Server destination dependencies are not initialized.");
+
             var tempTable = $"__tmp_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
             SqlServerDestinationChunkMetrics sqlMetrics;
             if (prepared.LocalPath is not null && prepared.RowStream is null)
             {
-                sqlMetrics = await sqlServerLoader!.LoadAndMergeFromCsvAsync(
+                sqlMetrics = await sqlServerLoader.LoadAndMergeFromCsvAsync(
                     targetSchema: targetSchema,
                     targetTable: targetTable,
                     tempTable: tempTable,
@@ -582,7 +621,7 @@ public static class Program
             }
             else
             {
-                sqlMetrics = await sqlServerLoader!.LoadAndMergeAsync(
+                sqlMetrics = await sqlServerLoader.LoadAndMergeAsync(
                     targetSchema: targetSchema,
                     targetTable: targetTable,
                     tempTable: tempTable,
@@ -636,11 +675,22 @@ public static class Program
         }
     }
 
-    private static async Task EnsureTargetTable(ResolvedStreamConfig stream, string streamPrefix, string destinationType, WarehouseSchemaManager fabricSchemaManager, SqlServerDestinationSchemaManager sqlServerSchemaManager, string targetSchema, string targetTable, List<SourceColumn> sourceColumns)
+    private static async Task EnsureTargetTable(
+        ResolvedStreamConfig stream,
+        string streamPrefix,
+        string destinationType,
+        WarehouseSchemaManager? fabricSchemaManager,
+        SqlServerDestinationSchemaManager? sqlServerSchemaManager,
+        string targetSchema,
+        string targetTable,
+        List<SourceColumn> sourceColumns)
     {
         if (destinationType == "fabricWarehouse")
         {
-            await fabricSchemaManager!.EnsureTableAndSchemaAsync(
+            if (fabricSchemaManager is null)
+                throw new Exception("Fabric destination schema manager is not initialized.");
+
+            await fabricSchemaManager.EnsureTableAndSchemaAsync(
                 targetSchema,
                 targetTable,
                 sourceColumns,
@@ -649,7 +699,10 @@ public static class Program
         }
         else
         {
-            await sqlServerSchemaManager!.EnsureTableAndSchemaAsync(
+            if (sqlServerSchemaManager is null)
+                throw new Exception("SQL Server destination schema manager is not initialized.");
+
+            await sqlServerSchemaManager.EnsureTableAndSchemaAsync(
                 targetSchema,
                 targetTable,
                 sourceColumns,
@@ -672,9 +725,9 @@ public static class Program
         string destinationType,
         SourceChunkReader sourceChunkReader,
         string stagingFileFormat,
-        OneLakeUploader uploader,
-        WarehouseLoader fabricLoader,
-        SqlServerDestinationLoader sqlServerLoader,
+        OneLakeUploader? uploader,
+        WarehouseLoader? fabricLoader,
+        SqlServerDestinationLoader? sqlServerLoader,
         string targetSchema,
         string targetTable,
         List<SourceColumn> sourceColumns)
@@ -689,7 +742,27 @@ public static class Program
             : await sqlServerLoader!.GetStreamStateAsync(stream.Name, streamPrefix);
         if (ctStreamState?.ChangeTrackingVersion is long ctLastSyncVersion)
         {
-            await ProcessChangeTracking(stream, envConfig, runDeleteDetection, csvWriter, parquetWriter, logger, appPrefix, streamPrefix, destinationType, sourceChunkReader, stagingFileFormat, uploader, fabricLoader, sqlServerLoader, targetSchema, targetTable, sourceColumns, ctSourceTable, ctSyncToVersion, ctLastSyncVersion);
+            await ProcessChangeTracking(
+                stream,
+                envConfig,
+                runDeleteDetection,
+                csvWriter,
+                parquetWriter,
+                logger,
+                appPrefix,
+                streamPrefix,
+                destinationType,
+                sourceChunkReader,
+                stagingFileFormat,
+                uploader,
+                fabricLoader,
+                sqlServerLoader,
+                targetSchema,
+                targetTable,
+                sourceColumns,
+                ctSourceTable,
+                ctSyncToVersion.Value,
+                ctLastSyncVersion);
             return (true, null);
         }
 
@@ -702,7 +775,27 @@ public static class Program
         return (false, ctSyncToVersion.Value);
     }
 
-    private static async Task ProcessChangeTracking(ResolvedStreamConfig stream, EnvironmentConfig envConfig, bool runDeleteDetection, CsvGzipWriter csvWriter, ParquetChunkWriter parquetWriter, ILogger logger, string appPrefix, string streamPrefix, string destinationType, SourceChunkReader sourceChunkReader, string stagingFileFormat, OneLakeUploader uploader, WarehouseLoader fabricLoader, SqlServerDestinationLoader sqlServerLoader, string targetSchema, string targetTable, List<SourceColumn> sourceColumns, string ctSourceTable, long? ctSyncToVersion, long ctLastSyncVersion)
+    private static async Task ProcessChangeTracking(
+        ResolvedStreamConfig stream,
+        EnvironmentConfig envConfig,
+        bool runDeleteDetection,
+        CsvGzipWriter csvWriter,
+        ParquetChunkWriter parquetWriter,
+        ILogger logger,
+        string appPrefix,
+        string streamPrefix,
+        string destinationType,
+        SourceChunkReader sourceChunkReader,
+        string stagingFileFormat,
+        OneLakeUploader? uploader,
+        WarehouseLoader? fabricLoader,
+        SqlServerDestinationLoader? sqlServerLoader,
+        string targetSchema,
+        string targetTable,
+        List<SourceColumn> sourceColumns,
+        string ctSourceTable,
+        long ctSyncToVersion,
+        long ctLastSyncVersion)
     {
         var ctMinValidVersion = await sourceChunkReader.GetChangeTrackingMinValidVersionAsync(ctSourceTable, streamPrefix);
         if (ctMinValidVersion is null)
@@ -722,7 +815,7 @@ public static class Program
             streamPrefix,
             ctSourceTable,
             ctLastSyncVersion,
-            ctSyncToVersion.Value,
+            ctSyncToVersion,
             ctMinValidVersion.Value);
 
         var pkColumns = stream.PrimaryKey
@@ -731,6 +824,9 @@ public static class Program
 
         if (destinationType == "fabricWarehouse")
         {
+            if (uploader is null || fabricLoader is null)
+                throw new Exception("Fabric destination dependencies are not initialized.");
+
             // Upserts from CHANGETABLE (I/U) joined to current source rows.
             var ext = stagingFileFormat == "parquet" ? "parquet" : (stagingFileFormat == "csv" ? "csv" : "csv.gz");
             var upsertRunId = DateTime.UtcNow.ToString("yyyyMMdd_HHmmss_fff");
@@ -744,7 +840,7 @@ public static class Program
                 sourceColumns,
                 stream.PrimaryKey,
                 ctLastSyncVersion,
-                ctSyncToVersion.Value,
+                ctSyncToVersion,
                 streamPrefix);
             var upsertWriteSw = System.Diagnostics.Stopwatch.StartNew();
             var upsertWrite = stagingFileFormat == "parquet"
@@ -757,11 +853,11 @@ public static class Program
             if (upsertWrite.RowCount > 0)
             {
                 var upsertUploadSw = System.Diagnostics.Stopwatch.StartNew();
-                var upsertsDfsUrl = await uploader!.UploadAsync(upsertLocalPath, upsertFileName, streamPrefix);
+                var upsertsDfsUrl = await uploader.UploadAsync(upsertLocalPath, upsertFileName, streamPrefix);
                 upsertUploadSw.Stop();
 
                 var upsertTempTable = $"__tmp_ct_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-                var upsertMetrics = await fabricLoader!.LoadAndMergeAsync(
+                var upsertMetrics = await fabricLoader.LoadAndMergeAsync(
                     targetSchema: targetSchema,
                     targetTable: targetTable,
                     tempTable: upsertTempTable,
@@ -803,7 +899,7 @@ public static class Program
                 ctSourceTable,
                 stream.PrimaryKey,
                 ctLastSyncVersion,
-                ctSyncToVersion.Value,
+                ctSyncToVersion,
                 streamPrefix);
             var deleteWriteSw = System.Diagnostics.Stopwatch.StartNew();
             var deleteKeyWrite = await csvWriter.WriteCsvGzAsync(deleteKeysLocalPath, pkColumns, deleteKeysRows);
@@ -812,11 +908,11 @@ public static class Program
             if (deleteKeyWrite.RowCount > 0)
             {
                 var deleteUploadSw = System.Diagnostics.Stopwatch.StartNew();
-                var deleteKeysDfsUrl = await uploader!.UploadAsync(deleteKeysLocalPath, deleteKeysFileName, streamPrefix);
+                var deleteKeysDfsUrl = await uploader.UploadAsync(deleteKeysLocalPath, deleteKeysFileName, streamPrefix);
                 deleteUploadSw.Stop();
 
                 var deleteKeysTempTable = $"__tmp_ct_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-                var deleteMetrics = await fabricLoader!.SoftDeleteByKeysAsync(
+                var deleteMetrics = await fabricLoader.SoftDeleteByKeysAsync(
                     targetSchema: targetSchema,
                     targetTable: targetTable,
                     sourceKeysTempTable: deleteKeysTempTable,
@@ -856,10 +952,12 @@ public static class Program
                 sourceColumns,
                 stream.PrimaryKey,
                 ctLastSyncVersion,
-                ctSyncToVersion.Value,
+                ctSyncToVersion,
                 streamPrefix);
             var upsertTempTable = $"__tmp_ct_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-            var upsertMetrics = await sqlServerLoader!.LoadAndMergeAsync(
+            if (sqlServerLoader is null)
+                throw new Exception("SQL Server destination dependencies are not initialized.");
+            var upsertMetrics = await sqlServerLoader.LoadAndMergeAsync(
                 targetSchema: targetSchema,
                 targetTable: targetTable,
                 tempTable: upsertTempTable,
@@ -887,10 +985,10 @@ public static class Program
                 ctSourceTable,
                 stream.PrimaryKey,
                 ctLastSyncVersion,
-                ctSyncToVersion.Value,
+                ctSyncToVersion,
                 streamPrefix);
             var deleteKeysTempTable = $"__tmp_ct_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-            var deleteMetrics = await sqlServerLoader!.SoftDeleteByKeysAsync(
+            var deleteMetrics = await sqlServerLoader.SoftDeleteByKeysAsync(
                 targetSchema: targetSchema,
                 targetTable: targetTable,
                 sourceKeysTempTable: deleteKeysTempTable,
@@ -916,14 +1014,22 @@ public static class Program
         }
 
         if (destinationType == "fabricWarehouse")
-            await fabricLoader!.UpsertStreamChangeTrackingVersionAsync(stream.Name, ctSyncToVersion.Value, streamPrefix);
+        {
+            if (fabricLoader is null)
+                throw new Exception("Fabric destination loader is not initialized.");
+            await fabricLoader.UpsertStreamChangeTrackingVersionAsync(stream.Name, ctSyncToVersion, streamPrefix);
+        }
         else
-            await sqlServerLoader!.UpsertStreamChangeTrackingVersionAsync(stream.Name, ctSyncToVersion.Value, streamPrefix);
+        {
+            if (sqlServerLoader is null)
+                throw new Exception("SQL Server destination loader is not initialized.");
+            await sqlServerLoader.UpsertStreamChangeTrackingVersionAsync(stream.Name, ctSyncToVersion, streamPrefix);
+        }
         logger.LogInformation(
             "{LogPrefix} Change tracking stream state updated: stream={StreamName}, lastSyncVersion={Version}",
             appPrefix,
             stream.Name,
-            ctSyncToVersion.Value);
+            ctSyncToVersion);
 
         if (runDeleteDetection && string.Equals(stream.DeleteDetection.Type, "subset", StringComparison.OrdinalIgnoreCase))
         {
@@ -935,7 +1041,19 @@ public static class Program
         logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
     }
 
-    private static async Task ExecuteStreamWithHandlingAsync(ResolvedStreamConfig stream, CancellationToken cancellationToken, bool failFast, ILogger logger, string appPrefix, ConcurrentBag<string>? failedStreams, CancellationTokenSource? failFastCts, EnvironmentConfig envConfig, Dictionary<string, DestinationConnectionConfig> destinationConnections, bool runDeleteDetection, CsvGzipWriter csvWriter, ParquetChunkWriter parquetWriter)
+    private static async Task ExecuteStreamWithHandlingAsync(
+        ResolvedStreamConfig stream,
+        CancellationToken cancellationToken,
+        bool failFast,
+        ILogger logger,
+        string appPrefix,
+        ConcurrentBag<string> failedStreams,
+        CancellationTokenSource failFastCts,
+        EnvironmentConfig envConfig,
+        Dictionary<string, DestinationConnectionConfig> destinationConnections,
+        bool runDeleteDetection,
+        CsvGzipWriter csvWriter,
+        ParquetChunkWriter parquetWriter)
     {
         if (cancellationToken.IsCancellationRequested)
             return;
@@ -968,7 +1086,21 @@ public static class Program
 
     private static string ChunkLogPrefix(int idx, ResolvedStreamConfig stream) => $"[stream={stream.Name} chunk={idx:D2}]";
 
-    private static async Task<PreparedChunk?> PrepareNextChunkAsync(object initialLowerBound, int nextChunkIndex, EnvironmentConfig envConfig, CsvGzipWriter csvWriter, ParquetChunkWriter parquetWriter, ILogger logger, ResolvedStreamConfig stream, string? destinationType, SourceChunkReader? sourceChunkReader, string? stagingFileFormat, bool sqlServerBufferChunksToCsv, List<SourceColumn>? sourceColumns, object? srcMax, ChunkInterval? chunkInterval)
+    private static async Task<PreparedChunk?> PrepareNextChunkAsync(
+        object initialLowerBound,
+        int nextChunkIndex,
+        EnvironmentConfig envConfig,
+        CsvGzipWriter csvWriter,
+        ParquetChunkWriter parquetWriter,
+        ILogger logger,
+        ResolvedStreamConfig stream,
+        string destinationType,
+        SourceChunkReader sourceChunkReader,
+        string stagingFileFormat,
+        bool sqlServerBufferChunksToCsv,
+        List<SourceColumn> sourceColumns,
+        object srcMax,
+        ChunkInterval? chunkInterval)
     {
         var lowerBound = initialLowerBound;
         while (CompareUpdateKey(lowerBound, srcMax) <= 0)
