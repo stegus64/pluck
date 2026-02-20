@@ -2,7 +2,7 @@ maxParallelStreams: 2
 
 defaults:
     sourceConnection: "landSql"
-    destinationConnection: "fabric"
+    destinationConnection: "onprem"
     primaryKey: ["DW_Rowid"]
     updateKey: "DW_Rowid"
     chunkSize: 100000
@@ -11,6 +11,8 @@ defaults:
     stagingFileFormat: "csv.gz"
     targetTable: "{stream_table}"
     sourceSql: "SELECT * FROM dbo.{stream_table} -- WHERE DW_Rowid <= 1510000"
+    sql_server:
+        bufferChunksToCsvBeforeBulkCopy: true
 
 streams:
   M3_MITMAS:

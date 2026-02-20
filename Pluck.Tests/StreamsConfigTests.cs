@@ -37,6 +37,11 @@ public class StreamsConfigTests
                 PrimaryKey = ["DW_Rowid"],
                 UpdateKey = "DW_Rowid",
                 StagingFileFormat = "csv.gz",
+                SqlServer = new SqlServerStreamConfig
+                {
+                    BufferChunksToCsvBeforeBulkCopy = true,
+                    CreateClusteredColumnstoreOnCreate = true
+                }
             },
             Streams = new Dictionary<string, StreamConfig>(StringComparer.OrdinalIgnoreCase)
             {
@@ -58,6 +63,8 @@ public class StreamsConfigTests
         stream.SourceSql.Should().Be("SELECT * FROM dbo.M3_MITMAS");
         stream.TargetTable.Should().Be("M3_MITMAS");
         stream.DestinationConnection.Should().Be("fabricLanding");
+        stream.SqlServer.BufferChunksToCsvBeforeBulkCopy.Should().BeTrue();
+        stream.SqlServer.CreateClusteredColumnstoreOnCreate.Should().BeTrue();
         stream.ChangeTracking.Enabled.Should().BeTrue();
         stream.ChangeTracking.SourceTable.Should().Be("dbo.M3_MITMAS");
     }

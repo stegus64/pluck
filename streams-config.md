@@ -170,6 +170,26 @@ Aliases also accepted:
 - `"gz"` -> `csv.gz`
 - `"pq"` -> `parquet`
 
+### `sql_server` (optional)
+
+SQL Server destination-specific stream options.
+
+```yaml
+sql_server:
+  bufferChunksToCsvBeforeBulkCopy: true
+  createClusteredColumnstoreOnCreate: true
+```
+
+Fields:
+
+- `bufferChunksToCsvBeforeBulkCopy` (optional, default `false`):
+  - when `true` and destination type is `sqlServer`, each update-key chunk is first written to an uncompressed local CSV file, then loaded with `SqlBulkCopy` from that CSV.
+  - this shortens the time spent holding source-side locks by finishing source reads quickly before destination load work starts.
+- `createClusteredColumnstoreOnCreate` (optional, default `false`):
+  - when `true`, Pluck creates a clustered columnstore index (`__pluck_cci`) immediately after creating a new target table.
+  - applies only to `sqlServer` destinations.
+  - if the target table already exists, Pluck does not modify indexing.
+
 ### `excludeColumns` (optional)
 
 List of columns to exclude from replication.

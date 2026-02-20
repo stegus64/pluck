@@ -15,7 +15,12 @@ public sealed class WarehouseSchemaManager
         _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
     }
 
-    public async Task EnsureTableAndSchemaAsync(string schema, string table, List<SourceColumn> sourceColumns, List<string> primaryKey, string? logPrefix = null)
+    public async Task EnsureTableAndSchemaAsync(
+        string schema,
+        string table,
+        List<SourceColumn> sourceColumns,
+        List<string> primaryKey,
+        string? logPrefix = null)
     {
         await using var conn = await _factory.OpenAsync(logPrefix: logPrefix);
 

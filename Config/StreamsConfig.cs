@@ -48,6 +48,8 @@ public sealed class StreamConfig
     public string? ChunkSize { get; set; }
     // Supported values: "csv.gz" (default), "csv", "parquet"
     public string? StagingFileFormat { get; set; }
+    [YamlMember(Alias = "sql_server", ApplyNamingConventions = false)]
+    public SqlServerStreamConfig? SqlServer { get; set; }
     [YamlMember(Alias = "delete_detection", ApplyNamingConventions = false)]
     public DeleteDetectionConfig? DeleteDetection { get; set; }
     [YamlMember(Alias = "change_tracking", ApplyNamingConventions = false)]
@@ -67,6 +69,7 @@ public sealed class StreamConfig
             UpdateKey = streamOverride?.UpdateKey ?? defaults.UpdateKey,
             ChunkSize = streamOverride?.ChunkSize ?? defaults.ChunkSize,
             StagingFileFormat = streamOverride?.StagingFileFormat ?? defaults.StagingFileFormat,
+            SqlServer = SqlServerStreamConfig.Merge(defaults.SqlServer, streamOverride?.SqlServer),
             DeleteDetection = DeleteDetectionConfig.Merge(defaults.DeleteDetection, streamOverride?.DeleteDetection),
             ChangeTracking = ChangeTrackingConfig.Merge(defaults.ChangeTracking, streamOverride?.ChangeTracking)
         };
@@ -119,6 +122,7 @@ public sealed class StreamConfig
             UpdateKey = UpdateKey,
             ChunkSize = chunkSize,
             StagingFileFormat = string.IsNullOrWhiteSpace(StagingFileFormat) ? "csv.gz" : StagingFileFormat,
+            SqlServer = SqlServerStreamConfig.Resolve(SqlServer),
             DeleteDetection = DeleteDetectionConfig.Resolve(DeleteDetection, streamName),
             ChangeTracking = ChangeTrackingConfig.Resolve(ChangeTracking, streamName)
         };
@@ -146,8 +150,40 @@ public sealed class ResolvedStreamConfig
     public string UpdateKey { get; set; } = "";
     public string? ChunkSize { get; set; }
     public string StagingFileFormat { get; set; } = "csv.gz";
+    public SqlServerStreamConfig SqlServer { get; set; } = new();
     public DeleteDetectionConfig DeleteDetection { get; set; } = new() { Type = "none" };
     public ChangeTrackingConfig ChangeTracking { get; set; } = new() { Enabled = false };
+}
+
+public sealed class SqlServerStreamConfig
+{
+    public bool? BufferChunksToCsvBeforeBulkCopy { get; set; }
+    public bool? CreateClusteredColumnstoreOnCreate { get; set; }
+
+    public static SqlServerStreamConfig? Merge(SqlServerStreamConfig? defaults, SqlServerStreamConfig? streamOverride)
+    {
+        if (defaults is null && streamOverride is null)
+            return null;
+
+        return new SqlServerStreamConfig
+        {
+            BufferChunksToCsvBeforeBulkCopy =
+                streamOverride?.BufferChunksToCsvBeforeBulkCopy
+                ?? defaults?.BufferChunksToCsvBeforeBulkCopy,
+            CreateClusteredColumnstoreOnCreate =
+                streamOverride?.CreateClusteredColumnstoreOnCreate
+                ?? defaults?.CreateClusteredColumnstoreOnCreate
+        };
+    }
+
+    public static SqlServerStreamConfig Resolve(SqlServerStreamConfig? cfg)
+    {
+        return new SqlServerStreamConfig
+        {
+            BufferChunksToCsvBeforeBulkCopy = cfg?.BufferChunksToCsvBeforeBulkCopy ?? false,
+            CreateClusteredColumnstoreOnCreate = cfg?.CreateClusteredColumnstoreOnCreate ?? false
+        };
+    }
 }
 
 public sealed class DeleteDetectionConfig

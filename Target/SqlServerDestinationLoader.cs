@@ -4,11 +4,13 @@ using Pluck.Config;
 using Pluck.Source;
 using Pluck.Util;
 using System.Data;
+using System.Globalization;
+using CsvHelper;
 
 namespace Pluck.Target;
 
-public sealed record SqlServerDestinationChunkMetrics(TimeSpan BulkCopyElapsed, TimeSpan MergeElapsed);
-public sealed record SqlServerDestinationDeleteMetrics(TimeSpan BulkCopyElapsed, TimeSpan SoftDeleteElapsed, int AffectedRows);
+public sealed record SqlServerDestinationChunkMetrics(TimeSpan BulkCopyElapsed, TimeSpan MergeElapsed, int RowsCopied);
+public sealed record SqlServerDestinationDeleteMetrics(TimeSpan BulkCopyElapsed, TimeSpan SoftDeleteElapsed, int AffectedRows, int SourceKeysCopied);
 
 public sealed class SqlServerDestinationLoader
 {
@@ -27,6 +29,7 @@ public sealed class SqlServerDestinationLoader
         var sql = $"SELECT MAX([{updateKey}]) FROM [{schema}].[{table}];";
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
+        LogSql("get max update key", cmd, logPrefix);
         var v = await cmd.ExecuteScalarAsync();
         return v is DBNull ? null : v;
     }
@@ -43,6 +46,7 @@ WHERE [stream_name] = @streamName;
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
         cmd.Parameters.AddWithValue("@streamName", streamName);
+        LogSql("get stream state", cmd, logPrefix);
         await using var rdr = await cmd.ExecuteReaderAsync();
         if (!await rdr.ReadAsync())
             return null;
@@ -72,6 +76,7 @@ WHEN NOT MATCHED THEN
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
         cmd.Parameters.AddWithValue("@streamName", streamName);
         cmd.Parameters.AddWithValue("@ctLastSyncVersion", ctLastSyncVersion);
+        LogSql("upsert stream change tracking version", cmd, logPrefix);
         await cmd.ExecuteNonQueryAsync();
     }
 
@@ -81,7 +86,7 @@ WHEN NOT MATCHED THEN
         string tempTable,
         List<SourceColumn> columns,
         List<string> primaryKey,
-        List<object?[]> rows,
+        IAsyncEnumerable<object?[]> rows,
         CleanupConfig cleanup,
         string? logPrefix = null)
     {
@@ -97,14 +102,70 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
 ";
         await ExecAsync(conn, createTempSql, "create temp table", logPrefix);
 
-        var bulkElapsed = await BulkCopyIntoTempTableAsync(conn, targetSchema, tempTable, columns, rows, "bulk copy upsert rows", logPrefix);
+        var (bulkElapsed, rowsCopied) = await BulkCopyIntoTempTableAsync(conn, targetSchema, tempTable, columns, rows, "bulk copy upsert rows", logPrefix);
 
-        var loadedRowCount = await GetTableRowCountAsync(conn, targetSchema, tempTable);
-        if (loadedRowCount != rows.Count)
+        var loadedRowCount = await GetTableRowCountAsync(conn, targetSchema, tempTable, logPrefix);
+        if (loadedRowCount != rowsCopied)
         {
             throw new Exception(
                 $"Chunk row count mismatch before merge for [{targetSchema}].[{tempTable}]. " +
-                $"Source rows={rows.Count}, temp table rows={loadedRowCount}.");
+                $"Source rows={rowsCopied}, temp table rows={loadedRowCount}.");
+        }
+
+        TimeSpan mergeElapsed = TimeSpan.Zero;
+        if (rowsCopied > 0)
+        {
+            var mergeSql = MergeBuilder.BuildMergeSql(targetSchema, targetTable, tempTable, columns, primaryKey);
+            mergeElapsed = await ExecAsync(conn, mergeSql, "merge into target", logPrefix);
+        }
+
+        if (cleanup.DropTempTables)
+        {
+            var dropSql = $@"DROP TABLE [{targetSchema}].[{tempTable}];";
+            await ExecAsync(conn, dropSql, "drop temp table", logPrefix);
+        }
+
+        return new SqlServerDestinationChunkMetrics(bulkElapsed, mergeElapsed, rowsCopied);
+    }
+
+    public async Task<SqlServerDestinationChunkMetrics> LoadAndMergeFromCsvAsync(
+        string targetSchema,
+        string targetTable,
+        string tempTable,
+        List<SourceColumn> columns,
+        List<string> primaryKey,
+        string csvPath,
+        int expectedRowCount,
+        CleanupConfig cleanup,
+        string? logPrefix = null)
+    {
+        await using var conn = await _factory.OpenAsync(logPrefix: logPrefix);
+
+        var colDefs = string.Join(",\n", columns.Select(c =>
+            $"[{c.Name}] {TypeMapper.SqlServerToSqlServerType(c.SqlServerTypeName)} NULL"));
+
+        var createTempSql = $@"
+CREATE TABLE [{targetSchema}].[{tempTable}] (
+{colDefs}
+);
+";
+        await ExecAsync(conn, createTempSql, "create temp table", logPrefix);
+
+        var bulkElapsed = await BulkCopyCsvIntoTempTableAsync(
+            conn,
+            targetSchema,
+            tempTable,
+            csvPath,
+            expectedRowCount,
+            "bulk copy upsert rows from csv",
+            logPrefix);
+
+        var loadedRowCount = await GetTableRowCountAsync(conn, targetSchema, tempTable, logPrefix);
+        if (loadedRowCount != expectedRowCount)
+        {
+            throw new Exception(
+                $"Chunk row count mismatch before merge for [{targetSchema}].[{tempTable}]. " +
+                $"Source rows={expectedRowCount}, temp table rows={loadedRowCount}.");
         }
 
         var mergeSql = MergeBuilder.BuildMergeSql(targetSchema, targetTable, tempTable, columns, primaryKey);
@@ -116,7 +177,7 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
             await ExecAsync(conn, dropSql, "drop temp table", logPrefix);
         }
 
-        return new SqlServerDestinationChunkMetrics(bulkElapsed, mergeElapsed);
+        return new SqlServerDestinationChunkMetrics(bulkElapsed, mergeElapsed, loadedRowCount);
     }
 
     public async Task<SqlServerDestinationDeleteMetrics> SoftDeleteMissingRowsAsync(
@@ -124,7 +185,7 @@ CREATE TABLE [{targetSchema}].[{tempTable}] (
         string targetTable,
         string sourceKeysTempTable,
         List<SourceColumn> primaryKeyColumns,
-        List<object?[]> sourceKeys,
+        IAsyncEnumerable<object?[]> sourceKeys,
         string? subsetWhere,
         CleanupConfig cleanup,
         string? logPrefix = null)
@@ -140,14 +201,21 @@ CREATE TABLE [{targetSchema}].[{sourceKeysTempTable}] (
 ";
         await ExecAsync(conn, createTempSql, "create source-keys temp table", logPrefix);
 
-        var bulkElapsed = await BulkCopyIntoTempTableAsync(conn, targetSchema, sourceKeysTempTable, primaryKeyColumns, sourceKeys, "bulk copy source keys", logPrefix);
+        var (bulkElapsed, sourceKeysCopied) = await BulkCopyIntoTempTableAsync(
+            conn,
+            targetSchema,
+            sourceKeysTempTable,
+            primaryKeyColumns,
+            sourceKeys,
+            "bulk copy source keys",
+            logPrefix);
 
-        var loadedSourceKeyRowCount = await GetTableRowCountAsync(conn, targetSchema, sourceKeysTempTable);
-        if (loadedSourceKeyRowCount != sourceKeys.Count)
+        var loadedSourceKeyRowCount = await GetTableRowCountAsync(conn, targetSchema, sourceKeysTempTable, logPrefix);
+        if (loadedSourceKeyRowCount != sourceKeysCopied)
         {
             throw new Exception(
                 $"Delete-detection key row count mismatch for [{targetSchema}].[{sourceKeysTempTable}]. " +
-                $"Source keys={sourceKeys.Count}, temp table rows={loadedSourceKeyRowCount}.");
+                $"Source keys={sourceKeysCopied}, temp table rows={loadedSourceKeyRowCount}.");
         }
 
         var pkJoin = string.Join(" AND ", primaryKeyColumns.Select(c => $"t.[{c.Name}] = s.[{c.Name}]"));
@@ -173,7 +241,7 @@ WHERE {subsetPredicate}
             await ExecAsync(conn, dropSql, "drop source-keys temp table", logPrefix);
         }
 
-        return new SqlServerDestinationDeleteMetrics(bulkElapsed, softDeleteElapsed, affectedRows);
+        return new SqlServerDestinationDeleteMetrics(bulkElapsed, softDeleteElapsed, affectedRows, loadedSourceKeyRowCount);
     }
 
     public async Task<SqlServerDestinationDeleteMetrics> SoftDeleteByKeysAsync(
@@ -181,7 +249,7 @@ WHERE {subsetPredicate}
         string targetTable,
         string sourceKeysTempTable,
         List<SourceColumn> primaryKeyColumns,
-        List<object?[]> sourceKeys,
+        IAsyncEnumerable<object?[]> sourceKeys,
         CleanupConfig cleanup,
         string? logPrefix = null)
     {
@@ -196,14 +264,21 @@ CREATE TABLE [{targetSchema}].[{sourceKeysTempTable}] (
 ";
         await ExecAsync(conn, createTempSql, "create ct-delete-keys temp table", logPrefix);
 
-        var bulkElapsed = await BulkCopyIntoTempTableAsync(conn, targetSchema, sourceKeysTempTable, primaryKeyColumns, sourceKeys, "bulk copy ct-delete keys", logPrefix);
+        var (bulkElapsed, sourceKeysCopied) = await BulkCopyIntoTempTableAsync(
+            conn,
+            targetSchema,
+            sourceKeysTempTable,
+            primaryKeyColumns,
+            sourceKeys,
+            "bulk copy ct-delete keys",
+            logPrefix);
 
-        var loadedSourceKeyRowCount = await GetTableRowCountAsync(conn, targetSchema, sourceKeysTempTable);
-        if (loadedSourceKeyRowCount != sourceKeys.Count)
+        var loadedSourceKeyRowCount = await GetTableRowCountAsync(conn, targetSchema, sourceKeysTempTable, logPrefix);
+        if (loadedSourceKeyRowCount != sourceKeysCopied)
         {
             throw new Exception(
                 $"CT delete-key row count mismatch for [{targetSchema}].[{sourceKeysTempTable}]. " +
-                $"Source keys={sourceKeys.Count}, temp table rows={loadedSourceKeyRowCount}.");
+                $"Source keys={sourceKeysCopied}, temp table rows={loadedSourceKeyRowCount}.");
         }
 
         var pkJoin = string.Join(" AND ", primaryKeyColumns.Select(c => $"t.[{c.Name}] = s.[{c.Name}]"));
@@ -224,26 +299,22 @@ WHERE ISNULL(t.[_pluck_update_op], '') <> 'D';
             await ExecAsync(conn, dropSql, "drop ct-delete-keys temp table", logPrefix);
         }
 
-        return new SqlServerDestinationDeleteMetrics(bulkElapsed, softDeleteElapsed, affectedRows);
+        return new SqlServerDestinationDeleteMetrics(bulkElapsed, softDeleteElapsed, affectedRows, loadedSourceKeyRowCount);
     }
 
-    private async Task<TimeSpan> BulkCopyIntoTempTableAsync(
+    private async Task<(TimeSpan Elapsed, int RowsCopied)> BulkCopyIntoTempTableAsync(
         SqlConnection conn,
         string schema,
         string table,
         List<SourceColumn> columns,
-        List<object?[]> rows,
+        IAsyncEnumerable<object?[]> rows,
         string operation,
         string? logPrefix)
     {
-        if (rows.Count == 0)
-            return TimeSpan.Zero;
-
         var method = (_factory.BulkLoad.Method ?? "SqlBulkCopy").Trim();
         if (!method.Equals("SqlBulkCopy", StringComparison.OrdinalIgnoreCase))
             throw new Exception($"Unsupported sqlServer.bulkLoad.method '{method}'. Supported values: SqlBulkCopy.");
-
-        var dataTable = BuildDataTable(columns, rows);
+        using var rowReader = new AsyncEnumerableObjectDataReader(columns, rows);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         using var bulkCopy = new SqlBulkCopy(conn)
         {
@@ -251,36 +322,68 @@ WHERE ISNULL(t.[_pluck_update_op], '') <> 'D';
             BatchSize = _factory.BulkLoad.BatchSize > 0 ? _factory.BulkLoad.BatchSize : 10000,
             BulkCopyTimeout = _factory.BulkLoad.BulkCopyTimeoutSeconds >= 0 ? _factory.BulkLoad.BulkCopyTimeoutSeconds : 0
         };
-        foreach (var c in columns)
-            bulkCopy.ColumnMappings.Add(c.Name, c.Name);
-        await bulkCopy.WriteToServerAsync(dataTable);
+        _log.LogDebug(
+            "{LogPrefix}SQL BulkCopy ({Operation}): destination={DestinationTable}; rows={RowCount}; batchSize={BatchSize}; timeoutSec={TimeoutSec}",
+            Prefix(logPrefix),
+            operation,
+            bulkCopy.DestinationTableName,
+            "<stream>",
+            bulkCopy.BatchSize,
+            bulkCopy.BulkCopyTimeout);
+        await bulkCopy.WriteToServerAsync(rowReader);
+        sw.Stop();
+        _log.LogDebug(
+            "{LogPrefix}{Operation} elapsed: {Elapsed}ms; rowsCopied={RowsCopied}",
+            Prefix(logPrefix),
+            operation,
+            sw.Elapsed.TotalMilliseconds,
+            rowReader.RowsRead);
+        return (sw.Elapsed, rowReader.RowsRead);
+    }
+
+    private async Task<TimeSpan> BulkCopyCsvIntoTempTableAsync(
+        SqlConnection conn,
+        string schema,
+        string table,
+        string csvPath,
+        int expectedRowCount,
+        string operation,
+        string? logPrefix)
+    {
+        var method = (_factory.BulkLoad.Method ?? "SqlBulkCopy").Trim();
+        if (!method.Equals("SqlBulkCopy", StringComparison.OrdinalIgnoreCase))
+            throw new Exception($"Unsupported sqlServer.bulkLoad.method '{method}'. Supported values: SqlBulkCopy.");
+
+        using var sr = new StreamReader(csvPath);
+        using var csv = new CsvReader(sr, CultureInfo.InvariantCulture);
+        using var csvDataReader = new CsvDataReader(csv);
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        using var bulkCopy = new SqlBulkCopy(conn)
+        {
+            DestinationTableName = $"[{schema}].[{table}]",
+            BatchSize = _factory.BulkLoad.BatchSize > 0 ? _factory.BulkLoad.BatchSize : 10000,
+            BulkCopyTimeout = _factory.BulkLoad.BulkCopyTimeoutSeconds >= 0 ? _factory.BulkLoad.BulkCopyTimeoutSeconds : 0
+        };
+        _log.LogDebug(
+            "{LogPrefix}SQL BulkCopy ({Operation}): destination={DestinationTable}; csvPath={CsvPath}; expectedRows={ExpectedRows}; batchSize={BatchSize}; timeoutSec={TimeoutSec}",
+            Prefix(logPrefix),
+            operation,
+            bulkCopy.DestinationTableName,
+            csvPath,
+            expectedRowCount,
+            bulkCopy.BatchSize,
+            bulkCopy.BulkCopyTimeout);
+        await bulkCopy.WriteToServerAsync(csvDataReader);
         sw.Stop();
         _log.LogDebug("{LogPrefix}{Operation} elapsed: {Elapsed}ms", Prefix(logPrefix), operation, sw.Elapsed.TotalMilliseconds);
         return sw.Elapsed;
-    }
-
-    private static DataTable BuildDataTable(List<SourceColumn> columns, List<object?[]> rows)
-    {
-        var table = new DataTable();
-        foreach (var c in columns)
-            table.Columns.Add(c.Name, typeof(object));
-
-        foreach (var row in rows)
-        {
-            var dr = table.NewRow();
-            for (var i = 0; i < columns.Count; i++)
-                dr[i] = row[i] ?? DBNull.Value;
-            table.Rows.Add(dr);
-        }
-
-        return table;
     }
 
     private async Task<TimeSpan> ExecAsync(SqlConnection conn, string sql, string operation, string? logPrefix = null)
     {
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
-        _log.LogDebug("{LogPrefix}SQL Exec ({Operation}) started.", Prefix(logPrefix), operation);
+        LogSql(operation, cmd, logPrefix);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await cmd.ExecuteNonQueryAsync();
         sw.Stop();
@@ -291,18 +394,19 @@ WHERE ISNULL(t.[_pluck_update_op], '') <> 'D';
     {
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
-        _log.LogDebug("{LogPrefix}SQL ExecWithRows ({Operation}) started.", Prefix(logPrefix), operation);
+        LogSql(operation, cmd, logPrefix);
         var sw = System.Diagnostics.Stopwatch.StartNew();
         var rows = await cmd.ExecuteNonQueryAsync();
         sw.Stop();
         return (sw.Elapsed, rows);
     }
 
-    private async Task<int> GetTableRowCountAsync(SqlConnection conn, string schema, string table)
+    private async Task<int> GetTableRowCountAsync(SqlConnection conn, string schema, string table, string? logPrefix)
     {
         var sql = $@"SELECT COUNT(*) FROM [{schema}].[{table}];";
         await using var cmd = new SqlCommand(sql, conn);
         cmd.CommandTimeout = _factory.CommandTimeoutSeconds;
+        LogSql("get table row count", cmd, logPrefix);
         var result = await cmd.ExecuteScalarAsync();
         return Convert.ToInt32(result);
     }
@@ -326,4 +430,30 @@ END;
 
     private static string Prefix(string? logPrefix) =>
         string.IsNullOrWhiteSpace(logPrefix) ? "[app] " : $"{logPrefix} ";
+
+    private void LogSql(string operation, SqlCommand cmd, string? logPrefix)
+    {
+        _log.LogDebug(
+            "{LogPrefix}SQL ({Operation}): {SqlCompact}",
+            Prefix(logPrefix),
+            operation,
+            CompactSql(cmd.CommandText));
+        _log.LogTrace(
+            "{LogPrefix}SQL ({Operation}) full text: {Sql}",
+            Prefix(logPrefix),
+            operation,
+            cmd.CommandText);
+        _log.LogTrace(
+            "{LogPrefix}SQL ({Operation}) params: {Params}",
+            Prefix(logPrefix),
+            operation,
+            SqlLogFormatter.FormatParameters(cmd.Parameters));
+    }
+
+    private static string CompactSql(string sql)
+    {
+        var compact = string.Join(" ", sql.Split(['\r', '\n', '\t'], StringSplitOptions.RemoveEmptyEntries)).Trim();
+        const int max = 1200;
+        return compact.Length <= max ? compact : compact[..max] + "...";
+    }
 }

@@ -359,6 +359,16 @@ public static class Program
 
                 var targetSchema = stream.TargetSchema ?? destinationDefaultSchema ?? "dbo";
                 var targetTable = stream.TargetTable;
+                var sqlServerBufferChunksToCsv =
+                    destinationType == "sqlServer" &&
+                    stream.SqlServer.BufferChunksToCsvBeforeBulkCopy == true;
+                if (destinationType == "sqlServer")
+                {
+                    logger.LogInformation(
+                        "{LogPrefix} SQL Server destination chunk buffering: bufferChunksToCsvBeforeBulkCopy={Enabled}",
+                        streamPrefix,
+                        sqlServerBufferChunksToCsv);
+                }
 
                 // 1) Discover schema of the source query
                 var sourceColumns = await sourceSchemaReader.DescribeQueryAsync(stream.SourceSql, streamPrefix);
@@ -403,6 +413,7 @@ public static class Program
                         targetTable,
                         sourceColumns,
                         primaryKey: stream.PrimaryKey,
+                        createClusteredColumnstoreOnCreate: stream.SqlServer.CreateClusteredColumnstoreOnCreate == true,
                         logPrefix: streamPrefix);
                 }
 
@@ -566,32 +577,31 @@ public static class Program
                         }
                         else
                         {
-                            var upsertRows = await ToListAsync(sourceChunkReader.ReadChangeTrackingUpsertsAsync(
+                            var upsertRows = sourceChunkReader.ReadChangeTrackingUpsertsAsync(
                                 stream.SourceSql,
                                 ctSourceTable,
                                 sourceColumns,
                                 stream.PrimaryKey,
                                 ctLastSyncVersion,
                                 ctSyncToVersion.Value,
-                                streamPrefix));
+                                streamPrefix);
+                            var upsertTempTable = $"__tmp_ct_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
+                            var upsertMetrics = await sqlServerLoader!.LoadAndMergeAsync(
+                                targetSchema: targetSchema,
+                                targetTable: targetTable,
+                                tempTable: upsertTempTable,
+                                columns: sourceColumns,
+                                primaryKey: stream.PrimaryKey,
+                                rows: upsertRows,
+                                cleanup: envConfig.Cleanup,
+                                logPrefix: streamPrefix);
 
-                            if (upsertRows.Count > 0)
+                            if (upsertMetrics.RowsCopied > 0)
                             {
-                                var upsertTempTable = $"__tmp_ct_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-                                var upsertMetrics = await sqlServerLoader!.LoadAndMergeAsync(
-                                    targetSchema: targetSchema,
-                                    targetTable: targetTable,
-                                    tempTable: upsertTempTable,
-                                    columns: sourceColumns,
-                                    primaryKey: stream.PrimaryKey,
-                                    rows: upsertRows,
-                                    cleanup: envConfig.Cleanup,
-                                    logPrefix: streamPrefix);
-
                                 logger.LogInformation(
                                     "{LogPrefix} Change tracking upserts: rows={RowCount}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}",
                                     streamPrefix,
-                                    upsertRows.Count,
+                                    upsertMetrics.RowsCopied,
                                     upsertMetrics.BulkCopyElapsed.TotalMilliseconds,
                                     upsertMetrics.MergeElapsed.TotalMilliseconds);
                             }
@@ -600,28 +610,28 @@ public static class Program
                                 logger.LogInformation("{LogPrefix} Change tracking upserts: no changed insert/update rows.", streamPrefix);
                             }
 
-                            var deleteKeysRows = await ToListAsync(sourceChunkReader.ReadChangeTrackingDeletedKeysAsync(
+                            var deleteKeysRows = sourceChunkReader.ReadChangeTrackingDeletedKeysAsync(
                                 ctSourceTable,
                                 stream.PrimaryKey,
                                 ctLastSyncVersion,
                                 ctSyncToVersion.Value,
-                                streamPrefix));
-                            if (deleteKeysRows.Count > 0)
-                            {
-                                var deleteKeysTempTable = $"__tmp_ct_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-                                var deleteMetrics = await sqlServerLoader!.SoftDeleteByKeysAsync(
-                                    targetSchema: targetSchema,
-                                    targetTable: targetTable,
-                                    sourceKeysTempTable: deleteKeysTempTable,
-                                    primaryKeyColumns: pkColumns,
-                                    sourceKeys: deleteKeysRows,
-                                    cleanup: envConfig.Cleanup,
-                                    logPrefix: streamPrefix);
+                                streamPrefix);
+                            var deleteKeysTempTable = $"__tmp_ct_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
+                            var deleteMetrics = await sqlServerLoader!.SoftDeleteByKeysAsync(
+                                targetSchema: targetSchema,
+                                targetTable: targetTable,
+                                sourceKeysTempTable: deleteKeysTempTable,
+                                primaryKeyColumns: pkColumns,
+                                sourceKeys: deleteKeysRows,
+                                cleanup: envConfig.Cleanup,
+                                logPrefix: streamPrefix);
 
+                            if (deleteMetrics.SourceKeysCopied > 0)
+                            {
                                 logger.LogInformation(
                                     "{LogPrefix} Change tracking deletes: sourceDeleteKeys={SourceDeleteKeys}, bulkCopyMs={BulkCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
                                     streamPrefix,
-                                    deleteKeysRows.Count,
+                                    deleteMetrics.SourceKeysCopied,
                                     deleteMetrics.BulkCopyElapsed.TotalMilliseconds,
                                     deleteMetrics.SoftDeleteElapsed.TotalMilliseconds,
                                     deleteMetrics.AffectedRows);
@@ -778,37 +788,59 @@ public static class Program
                                     WriteElapsed: writeSw.Elapsed,
                                     LocalPath: localPath,
                                     FileName: fileName,
-                                    Rows: null);
+                                    RowStream: null);
                             }
 
-                            var materializeSw = System.Diagnostics.Stopwatch.StartNew();
-                            var rows = await ToListAsync(rowStream);
-                            materializeSw.Stop();
-
-                            if (rows.Count == 0)
+                            if (destinationType == "sqlServer" && sqlServerBufferChunksToCsv)
                             {
-                                if (chunkInterval is null)
+                                var localPath = Path.Combine(Path.GetTempPath(), "pluck-sqlserver-bulkcopy", Guid.NewGuid().ToString("N"), "chunk.csv");
+                                Directory.CreateDirectory(Path.GetDirectoryName(localPath)!);
+                                logger.LogDebug("{LogPrefix} Next chunk local csv spool path: {LocalPath}", chunkPrefix, localPath);
+
+                                var writeSw = System.Diagnostics.Stopwatch.StartNew();
+                                var chunkWrite = await csvWriter.WriteCsvAsync(localPath, sourceColumns, rowStream);
+                                writeSw.Stop();
+                                logger.LogDebug("{LogPrefix} Chunk csv spool file written. Elapsed: {Elapsed}ms", chunkPrefix, writeSw.Elapsed.TotalMilliseconds);
+
+                                if (chunkWrite.RowCount == 0)
                                 {
-                                    logger.LogDebug(
-                                        "{LogPrefix} No rows in single-chunk range [{LowerBound}, {MaxInclusive}].",
-                                        chunkPrefix,
-                                        lowerBound,
-                                        srcMax);
-                                }
-                                else
-                                {
-                                    logger.LogDebug(
-                                        "{LogPrefix} No rows in interval chunk [{LowerBound}, {UpperBound}).",
-                                        chunkPrefix,
-                                        lowerBound,
-                                        upperBound);
+                                    if (chunkInterval is null)
+                                    {
+                                        logger.LogDebug(
+                                            "{LogPrefix} No rows in single-chunk range [{LowerBound}, {MaxInclusive}].",
+                                            chunkPrefix,
+                                            lowerBound,
+                                            srcMax);
+                                    }
+                                    else
+                                    {
+                                        logger.LogDebug(
+                                            "{LogPrefix} No rows in interval chunk [{LowerBound}, {UpperBound}).",
+                                            chunkPrefix,
+                                            lowerBound,
+                                            upperBound);
+                                    }
+
+                                    if (envConfig.Cleanup.DeleteLocalTempFiles)
+                                        TryDeleteLocalTempFileAndDirectory(localPath, logger, chunkPrefix);
+                                    if (chunkInterval is null)
+                                        return null;
+
+                                    lowerBound = upperBound!;
+                                    continue;
                                 }
 
-                                if (chunkInterval is null)
-                                    return null;
-
-                                lowerBound = upperBound!;
-                                continue;
+                                var nextLowerBoundForSqlServerCsv = chunkInterval is null ? null : upperBound!;
+                                return new PreparedChunk(
+                                    ChunkIndex: nextChunkIndex,
+                                    LowerBound: lowerBound,
+                                    UpperBound: upperBound,
+                                    NextLowerBound: nextLowerBoundForSqlServerCsv,
+                                    RowCount: chunkWrite.RowCount,
+                                    WriteElapsed: writeSw.Elapsed,
+                                    LocalPath: localPath,
+                                    FileName: null,
+                                    RowStream: null);
                             }
 
                             var nextLowerBoundForSqlServer = chunkInterval is null ? null : upperBound!;
@@ -817,11 +849,11 @@ public static class Program
                                 LowerBound: lowerBound,
                                 UpperBound: upperBound,
                                 NextLowerBound: nextLowerBoundForSqlServer,
-                                RowCount: rows.Count,
-                                WriteElapsed: materializeSw.Elapsed,
+                                RowCount: 0,
+                                WriteElapsed: TimeSpan.Zero,
                                 LocalPath: null,
                                 FileName: null,
-                                Rows: rows);
+                                RowStream: rowStream);
                         }
 
                         return null;
@@ -902,22 +934,40 @@ public static class Program
                         else
                         {
                             var tempTable = $"__tmp_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
-                            var sqlMetrics = await sqlServerLoader!.LoadAndMergeAsync(
-                                targetSchema: targetSchema,
-                                targetTable: targetTable,
-                                tempTable: tempTable,
-                                columns: sourceColumns,
-                                primaryKey: stream.PrimaryKey,
-                                rows: prepared.Rows!,
-                                cleanup: envConfig.Cleanup,
-                                logPrefix: chunkPrefix);
+                            SqlServerDestinationChunkMetrics sqlMetrics;
+                            if (prepared.LocalPath is not null && prepared.RowStream is null)
+                            {
+                                sqlMetrics = await sqlServerLoader!.LoadAndMergeFromCsvAsync(
+                                    targetSchema: targetSchema,
+                                    targetTable: targetTable,
+                                    tempTable: tempTable,
+                                    columns: sourceColumns,
+                                    primaryKey: stream.PrimaryKey,
+                                    csvPath: prepared.LocalPath,
+                                    expectedRowCount: prepared.RowCount,
+                                    cleanup: envConfig.Cleanup,
+                                    logPrefix: chunkPrefix);
+                            }
+                            else
+                            {
+                                sqlMetrics = await sqlServerLoader!.LoadAndMergeAsync(
+                                    targetSchema: targetSchema,
+                                    targetTable: targetTable,
+                                    tempTable: tempTable,
+                                    columns: sourceColumns,
+                                    primaryKey: stream.PrimaryKey,
+                                    rows: prepared.RowStream!,
+                                    cleanup: envConfig.Cleanup,
+                                    logPrefix: chunkPrefix);
+                            }
 
                             var totalSeconds =
                                 prepared.WriteElapsed.TotalSeconds +
                                 sqlMetrics.BulkCopyElapsed.TotalSeconds +
                                 sqlMetrics.MergeElapsed.TotalSeconds;
+                            var effectiveRowCount = sqlMetrics.RowsCopied;
                             var rowsPerSecond = totalSeconds > 0
-                                ? prepared.RowCount / totalSeconds
+                                ? effectiveRowCount / totalSeconds
                                 : 0d;
 
                             if (chunkInterval is null)
@@ -926,7 +976,7 @@ public static class Program
                                     "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, maxInclusive={MaxInclusive}, materializeMs={MaterializeMs:F0}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
                                     chunkPrefix,
                                     prepared.ChunkIndex,
-                                    prepared.RowCount,
+                                    effectiveRowCount,
                                     prepared.LowerBound,
                                     srcMax,
                                     prepared.WriteElapsed.TotalMilliseconds,
@@ -937,10 +987,10 @@ public static class Program
                             else
                             {
                                 logger.LogInformation(
-                                    "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, materializeMs={MaterializeMs:F0}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
+                                    "{LogPrefix} Chunk {ChunkIndex}: rows={RowCount}, lowerBound={LowerBound}, upperBoundExclusive={UpperBound}, preLoadMs={PreLoadMs:F0}, bulkCopyMs={BulkCopyMs:F0}, mergeMs={MergeMs:F0}, avgRowsPerSec={RowsPerSec:F1}",
                                     chunkPrefix,
                                     prepared.ChunkIndex,
-                                    prepared.RowCount,
+                                    effectiveRowCount,
                                     prepared.LowerBound,
                                     prepared.UpperBound,
                                     prepared.WriteElapsed.TotalMilliseconds,
@@ -948,6 +998,9 @@ public static class Program
                                     sqlMetrics.MergeElapsed.TotalMilliseconds,
                                     rowsPerSecond);
                             }
+
+                            if (envConfig.Cleanup.DeleteLocalTempFiles && prepared.LocalPath is not null)
+                                TryDeleteLocalTempFileAndDirectory(prepared.LocalPath, logger, chunkPrefix);
                         }
                     }
                 }
@@ -1017,29 +1070,24 @@ public static class Program
                     }
                     else
                     {
-                        var readKeysSw = System.Diagnostics.Stopwatch.StartNew();
-                        var sourceKeys = await ToListAsync(keyStream);
-                        readKeysSw.Stop();
-
                         var keysTempTable = $"__tmp_delkeys_{SqlName.SafeIdentifier(stream.Name)}_{Guid.NewGuid():N}";
                         var deleteMetrics = await sqlServerLoader!.SoftDeleteMissingRowsAsync(
                             targetSchema: targetSchema,
                             targetTable: targetTable,
                             sourceKeysTempTable: keysTempTable,
                             primaryKeyColumns: pkColumns,
-                            sourceKeys: sourceKeys,
+                            sourceKeys: keyStream,
                             subsetWhere: stream.DeleteDetection.Where,
                             cleanup: envConfig.Cleanup,
                             logPrefix: streamPrefix);
 
                         logger.LogInformation(
-                            "{LogPrefix} Delete detection ({Type}) stream {StreamName}: sourceKeys={SourceKeys}, subsetWhere={SubsetWhere}, keyReadMs={KeyReadMs:F0}, keyBulkCopyMs={KeyBulkCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
+                            "{LogPrefix} Delete detection ({Type}) stream {StreamName}: sourceKeys={SourceKeys}, subsetWhere={SubsetWhere}, keyBulkCopyMs={KeyBulkCopyMs:F0}, softDeleteMs={SoftDeleteMs:F0}, softDeletedRows={SoftDeletedRows}",
                             streamPrefix,
                             stream.DeleteDetection.Type,
                             stream.Name,
-                            sourceKeys.Count,
+                            deleteMetrics.SourceKeysCopied,
                             string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where,
-                            readKeysSw.Elapsed.TotalMilliseconds,
                             deleteMetrics.BulkCopyElapsed.TotalMilliseconds,
                             deleteMetrics.SoftDeleteElapsed.TotalMilliseconds,
                             deleteMetrics.AffectedRows);
@@ -1072,7 +1120,7 @@ public static class Program
             {
                 var streamPrefix = $"[stream={stream.Name}]";
                 logger.LogDebug(
-                    "{LogPrefix} Resolved stream config: sourceConnection={SourceConnection}; destinationConnection={DestinationConnection}; sourceSql={SourceSql}; targetSchema={TargetSchema}; targetTable={TargetTable}; primaryKey=[{PrimaryKey}]; excludeColumns=[{ExcludeColumns}]; updateKey={UpdateKey}; chunkSize={ChunkSize}; stagingFileFormat={StagingFileFormat}; deleteDetectionType={DeleteDetectionType}; deleteDetectionWhere={DeleteDetectionWhere}; changeTrackingEnabled={ChangeTrackingEnabled}; changeTrackingSourceTable={ChangeTrackingSourceTable}",
+                    "{LogPrefix} Resolved stream config: sourceConnection={SourceConnection}; destinationConnection={DestinationConnection}; sourceSql={SourceSql}; targetSchema={TargetSchema}; targetTable={TargetTable}; primaryKey=[{PrimaryKey}]; excludeColumns=[{ExcludeColumns}]; updateKey={UpdateKey}; chunkSize={ChunkSize}; stagingFileFormat={StagingFileFormat}; sqlServerBufferChunksToCsvBeforeBulkCopy={SqlServerBufferChunksToCsvBeforeBulkCopy}; sqlServerCreateClusteredColumnstoreOnCreate={SqlServerCreateClusteredColumnstoreOnCreate}; deleteDetectionType={DeleteDetectionType}; deleteDetectionWhere={DeleteDetectionWhere}; changeTrackingEnabled={ChangeTrackingEnabled}; changeTrackingSourceTable={ChangeTrackingSourceTable}",
                     streamPrefix,
                     stream.SourceConnection,
                     stream.DestinationConnection,
@@ -1084,6 +1132,8 @@ public static class Program
                     stream.UpdateKey,
                     stream.ChunkSize ?? "<none>",
                     stream.StagingFileFormat,
+                    stream.SqlServer.BufferChunksToCsvBeforeBulkCopy == true,
+                    stream.SqlServer.CreateClusteredColumnstoreOnCreate == true,
                     stream.DeleteDetection.Type,
                     string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where,
                     stream.ChangeTracking.Enabled == true,
@@ -1440,15 +1490,7 @@ public static class Program
         TimeSpan WriteElapsed,
         string? LocalPath,
         string? FileName,
-        List<object?[]>? Rows);
-
-    private static async Task<List<object?[]>> ToListAsync(IAsyncEnumerable<object?[]> source)
-    {
-        var result = new List<object?[]>();
-        await foreach (var row in source)
-            result.Add(row);
-        return result;
-    }
+        IAsyncEnumerable<object?[]>? RowStream);
 
     private static void TryDeleteLocalTempFileAndDirectory(string localPath, ILogger logger, string logPrefix)
     {
