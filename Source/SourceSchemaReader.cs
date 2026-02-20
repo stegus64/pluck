@@ -1,3 +1,5 @@
+using System.Data;
+using System.Data.Common;
 using Microsoft.Data.SqlClient;
 using Pluck.Util;
 
@@ -7,11 +9,13 @@ using Microsoft.Extensions.Logging;
 
 public sealed class SourceSchemaReader
 {
+    private readonly string _sourceType;
     private readonly string _connString;
     private readonly int _commandTimeoutSeconds;
     private readonly ILogger _log;
-    public SourceSchemaReader(string connString, int commandTimeoutSeconds = 3600, ILogger? log = null)
+    public SourceSchemaReader(string connString, int commandTimeoutSeconds = 3600, ILogger? log = null, string sourceType = SourceProvider.SqlServer)
     {
+        _sourceType = SourceProvider.NormalizeSourceType(sourceType);
         _connString = connString;
         _commandTimeoutSeconds = commandTimeoutSeconds > 0 ? commandTimeoutSeconds : 3600;
         _log = log ?? Microsoft.Extensions.Logging.Abstractions.NullLogger.Instance;
@@ -19,10 +23,18 @@ public sealed class SourceSchemaReader
 
     public async Task<List<SourceColumn>> DescribeQueryAsync(string sourceSql, string? logPrefix = null)
     {
-        var described = await DescribeBySpDescribeFirstResultSetAsync(sourceSql, logPrefix);
-        if (described.Count > 0) return described;
+        if (string.Equals(_sourceType, SourceProvider.SqlServer, StringComparison.OrdinalIgnoreCase))
+        {
+            var described = await DescribeBySpDescribeFirstResultSetAsync(sourceSql, logPrefix);
+            if (described.Count > 0)
+                return described;
+        }
 
-        throw new Exception("Could not derive schema from sourceSql using DescribeFirstResultSet.");
+        var fallback = await DescribeBySchemaOnlyReaderAsync(sourceSql, logPrefix);
+        if (fallback.Count > 0)
+            return fallback;
+
+        throw new Exception("Could not derive schema from sourceSql.");
     }
 
     private async Task<List<SourceColumn>> DescribeBySpDescribeFirstResultSetAsync(string sourceSql, string? logPrefix = null)
@@ -65,6 +77,43 @@ EXEC sp_describe_first_result_set @tsql = @q, @params = NULL, @browse_informatio
         return result;
     }
 
+    private async Task<List<SourceColumn>> DescribeBySchemaOnlyReaderAsync(string sourceSql, string? logPrefix = null)
+    {
+        var wrappedSql = $@"
+SELECT *
+FROM (
+    {sourceSql}
+) AS src
+WHERE 1 = 0;
+";
+
+        await using var conn = SourceProvider.CreateConnection(_sourceType, _connString);
+        await conn.OpenAsync();
+
+        await using var cmd = conn.CreateCommand();
+        cmd.CommandText = wrappedSql;
+        cmd.CommandTimeout = _commandTimeoutSeconds;
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        _log.LogDebug("{LogPrefix}Describe (schema-only reader) execution started.", Prefix(logPrefix));
+        _log.LogTrace("{LogPrefix}SQL Describe (schema-only reader): {Sql}", Prefix(logPrefix), wrappedSql);
+        await using var rdr = await cmd.ExecuteReaderAsync(CommandBehavior.SchemaOnly | CommandBehavior.KeyInfo);
+        sw.Stop();
+        _log.LogDebug("{LogPrefix}Describe execution time: {Elapsed}ms", Prefix(logPrefix), sw.Elapsed.TotalMilliseconds);
+
+        var schema = rdr.GetColumnSchema();
+        var result = new List<SourceColumn>(schema.Count);
+        foreach (var col in schema)
+        {
+            var name = string.IsNullOrWhiteSpace(col.ColumnName) ? col.BaseColumnName : col.ColumnName;
+            if (string.IsNullOrWhiteSpace(name))
+                continue;
+
+            result.Add(SourceColumn.FromSchema(name, col.DataTypeName, col.DataType, col.AllowDBNull));
+        }
+
+        return result;
+    }
+
     private static string Prefix(string? logPrefix) =>
         string.IsNullOrWhiteSpace(logPrefix) ? "[app] " : $"{logPrefix} ";
 }
@@ -91,6 +140,12 @@ public sealed record SourceColumn(
         return new SourceColumn(name, sqlType, IsNullable: true);
     }
 
+    public static SourceColumn FromSchema(string name, string? dataTypeName, Type? dataType, bool? isNullable)
+    {
+        var sqlType = MapProviderTypeToSqlServerType(dataTypeName, dataType);
+        return new SourceColumn(name, sqlType, isNullable ?? true);
+    }
+
     private static string Normalize(string systemTypeName)
     {
         // strip "NULL"/"NOT NULL" if present
@@ -98,5 +153,18 @@ public sealed record SourceColumn(
             .Replace("NOT NULL", "", StringComparison.OrdinalIgnoreCase)
             .Replace("NULL", "", StringComparison.OrdinalIgnoreCase)
             .Trim();
+    }
+
+    private static string MapProviderTypeToSqlServerType(string? dataTypeName, Type? dataType)
+    {
+        if (!string.IsNullOrWhiteSpace(dataTypeName))
+        {
+            var mapped = TypeMapper.BigQueryToSqlServerType(dataTypeName);
+            if (!string.IsNullOrWhiteSpace(mapped))
+                return mapped;
+        }
+
+        var adoTypeName = dataType?.Name ?? "Object";
+        return TypeMapper.AdoTypeToSqlServerType(adoTypeName);
     }
 }

@@ -254,6 +254,10 @@ Fields:
   - One- to three-part table identifier used by `CHANGETABLE(CHANGES ...)`.
   - Example: `dbo.M3_ORDERS`
 
+Notes:
+
+- `change_tracking` is supported only when the stream's `sourceConnection` uses `type: sqlServer` in `connections.yaml`.
+
 Behavior:
 
 - When enabled and stream state exists:

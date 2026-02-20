@@ -14,9 +14,15 @@ environments:
   dev:
     sourceConnections:
       landSql:
+        type: "sqlServer"
         connectionString: "Server=sql1;Database=LandDb;User Id=user;Password=secret;Encrypt=True;TrustServerCertificate=True"
         commandTimeoutSeconds: 3600
       erpSql:
+        type: "bigQuery"
+        connectionString: "Driver={Simba Google BigQuery ODBC Driver};ProjectId=my-project;OAuthType=3;..."
+        commandTimeoutSeconds: 3600
+      erpSqlReplica:
+        type: "sqlServer"
         connectionString: "Server=sql2;Database=ErpDb;User Id=user;Password=secret;Encrypt=True;TrustServerCertificate=True"
         commandTimeoutSeconds: 3600
 
@@ -72,13 +78,17 @@ Each stream in `streams.yaml` must reference one of these names via `sourceConne
 ```yaml
 sourceConnections:
   landSql:
+    type: "sqlServer"
     connectionString: "Server=sql;Database=db;..."
     commandTimeoutSeconds: 3600
 ```
 
 Fields per source connection:
 
-- `connectionString` (required): SQL Server connection string.
+- `type` (optional): `sqlServer` (default) or `bigQuery`.
+- `connectionString` (required):
+  - for `sqlServer`: SQL Server connection string.
+  - for `bigQuery`: Google BigQuery ODBC connection string.
 - `commandTimeoutSeconds` (optional): command timeout in seconds. Default `3600`.
 
 ### `destinationConnections` (required)

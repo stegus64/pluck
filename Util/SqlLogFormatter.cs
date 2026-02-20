@@ -1,6 +1,7 @@
 using System.Globalization;
 using System.Text;
 using Microsoft.Data.SqlClient;
+using System.Data.Common;
 
 namespace Pluck.Util;
 
@@ -13,6 +14,18 @@ public static class SqlLogFormatter
 
         var parts = new List<string>(parameters.Count);
         foreach (SqlParameter p in parameters)
+            parts.Add($"{p.ParameterName}={FormatValue(p.Value, maxValueChars)}");
+
+        return string.Join(", ", parts);
+    }
+
+    public static string FormatParameters(DbParameterCollection parameters, int maxValueChars = 256)
+    {
+        if (parameters.Count == 0)
+            return "(none)";
+
+        var parts = new List<string>(parameters.Count);
+        foreach (DbParameter p in parameters)
             parts.Add($"{p.ParameterName}={FormatValue(p.Value, maxValueChars)}");
 
         return string.Join(", ", parts);

@@ -87,6 +87,28 @@ public static class TypeMapper
         };
     }
 
+    public static string? BigQueryToSqlServerType(string providerTypeName)
+    {
+        var normalized = providerTypeName.Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "int64" or "integer" => "bigint",
+            "float64" or "float" => "float",
+            "numeric" => "decimal(38, 9)",
+            "bignumeric" => "decimal(38, 18)",
+            "bool" or "boolean" => "bit",
+            "string" => "nvarchar(max)",
+            "bytes" => "varbinary(max)",
+            "date" => "date",
+            "time" => "time(6)",
+            "datetime" => "datetime2(6)",
+            "timestamp" => "datetime2(6)",
+            "json" => "nvarchar(max)",
+            "geography" => "nvarchar(max)",
+            _ => null
+        };
+    }
+
     // For SQL Server destinations, source SQL Server type expressions are compatible.
     public static string SqlServerToSqlServerType(string sqlServerType)
     {

@@ -9,6 +9,7 @@ using Pluck.Util;
 using System.Globalization;
 using System.Text.RegularExpressions;
 using System.Collections.Concurrent;
+using System.Data.Common;
 
 namespace Pluck;
 
@@ -221,18 +222,15 @@ public static class Program
         var sourceSchemaReader = new SourceSchemaReader(
             sourceCfg.ConnectionString,
             sourceCfg.CommandTimeoutSeconds,
-            Logger);
+            Logger,
+            sourceCfg.Type);
         var sourceChunkReader = new SourceChunkReader(
             sourceCfg.ConnectionString,
             sourceCfg.CommandTimeoutSeconds,
-            Logger);
-        var sourceCsb = new SqlConnectionStringBuilder(sourceCfg.ConnectionString);
-        Logger.LogDebug(
-            "{LogPrefix} Source connection details: sourceConnection={SourceConnection}; server={Server}; database={Database}",
-            streamPrefix,
-            stream.SourceConnection,
-            sourceCsb.DataSource,
-            sourceCsb.InitialCatalog);
+            Logger,
+            sourceCfg.Type);
+        var sourceType = SourceProvider.NormalizeSourceType(sourceCfg.Type);
+        LogSourceConnectionDetails(streamPrefix, stream.SourceConnection, sourceType, sourceCfg.ConnectionString);
 
         Logger.LogInformation("{LogPrefix} === Stream: {StreamName} ===", streamPrefix, stream.Name);
         var stagingFileFormat = NormalizeStagingFileFormat(stream.StagingFileFormat);
@@ -316,6 +314,12 @@ public static class Program
         await EnsureTargetTable(stream, streamPrefix, destinationType, fabricSchemaManager, sqlServerSchemaManager, targetSchema, targetTable, sourceColumns);
 
         var changeTrackingEnabled = stream.ChangeTracking.Enabled == true;
+        if (changeTrackingEnabled && !SourceProvider.SupportsChangeTracking(sourceType))
+        {
+            throw new Exception(
+                $"Stream '{stream.Name}' has change_tracking enabled, but sourceConnection '{stream.SourceConnection}' is type '{sourceType}'. " +
+                "Change tracking is only supported for sqlServer sources.");
+        }
         long? ctVersionToPersistAfterStandard = null;
         if (changeTrackingEnabled)
         {
@@ -1250,15 +1254,25 @@ public static class Program
 
         foreach (var (sourceName, sourceCfg) in EnvConfig.SourceConnections)
         {
+            var sourceType = SourceProvider.NormalizeSourceType(sourceCfg.Type);
             try
             {
-                await using var conn = new SqlConnection(sourceCfg.ConnectionString);
+                await using var conn = SourceProvider.CreateConnection(sourceType, sourceCfg.ConnectionString);
                 await conn.OpenAsync();
-                Logger.LogInformation("{LogPrefix} Source SQL ({SourceConnection}): OK", AppPrefix, sourceName);
+                Logger.LogInformation(
+                    "{LogPrefix} Source ({SourceConnection}, type={SourceType}): OK",
+                    AppPrefix,
+                    sourceName,
+                    sourceType);
             }
             catch (Exception ex)
             {
-                Logger.LogError(ex, "{LogPrefix} Source SQL ({SourceConnection}): FAILED", AppPrefix, sourceName);
+                Logger.LogError(
+                    ex,
+                    "{LogPrefix} Source ({SourceConnection}, type={SourceType}): FAILED",
+                    AppPrefix,
+                    sourceName,
+                    sourceType);
                 return 2;
             }
         }
@@ -1596,6 +1610,58 @@ public static class Program
             "sql" => "sqlServer",
             _ => value ?? "fabricWarehouse"
         };
+    }
+
+    private static void LogSourceConnectionDetails(string streamPrefix, string sourceConnection, string sourceType, string connectionString)
+    {
+        if (string.Equals(sourceType, SourceProvider.SqlServer, StringComparison.OrdinalIgnoreCase))
+        {
+            var sourceCsb = new SqlConnectionStringBuilder(connectionString);
+            Logger.LogDebug(
+                "{LogPrefix} Source connection details: sourceConnection={SourceConnection}; sourceType={SourceType}; server={Server}; database={Database}",
+                streamPrefix,
+                sourceConnection,
+                sourceType,
+                sourceCsb.DataSource,
+                sourceCsb.InitialCatalog);
+            return;
+        }
+
+        if (string.Equals(sourceType, SourceProvider.BigQuery, StringComparison.OrdinalIgnoreCase))
+        {
+            string? dsn = null;
+            string? project = null;
+            string? dataset = null;
+            try
+            {
+                var csb = new DbConnectionStringBuilder { ConnectionString = connectionString };
+                dsn = csb.ContainsKey("Dsn") ? Convert.ToString(csb["Dsn"], CultureInfo.InvariantCulture) : null;
+                project = csb.ContainsKey("ProjectId") ? Convert.ToString(csb["ProjectId"], CultureInfo.InvariantCulture) : null;
+                dataset = csb.ContainsKey("DatasetId") ? Convert.ToString(csb["DatasetId"], CultureInfo.InvariantCulture) : null;
+            }
+            catch (ArgumentException)
+            {
+                dsn = null;
+                project = null;
+                dataset = null;
+            }
+
+            Logger.LogDebug(
+                "{LogPrefix} Source connection details: sourceConnection={SourceConnection}; sourceType={SourceType}; dsn={Dsn}; projectId={ProjectId}; datasetId={DatasetId}",
+                streamPrefix,
+                sourceConnection,
+                sourceType,
+                string.IsNullOrWhiteSpace(dsn) ? "<none>" : dsn,
+                string.IsNullOrWhiteSpace(project) ? "<none>" : project,
+                string.IsNullOrWhiteSpace(dataset) ? "<none>" : dataset);
+            return;
+        }
+
+        Logger.LogDebug(
+            "{LogPrefix} Source connection details: sourceConnection={SourceConnection}; sourceType={SourceType}",
+            streamPrefix,
+            sourceConnection,
+            sourceType);
     }
 
     private static int CompareUpdateKey(object left, object right)

@@ -50,6 +50,7 @@ public sealed class DestinationConnectionConfig
 
 public sealed class SourceSqlConfig
 {
+    public string Type { get; set; } = "sqlServer";
     public string ConnectionString { get; set; } = "";
     public int CommandTimeoutSeconds { get; set; } = 3600;
 }

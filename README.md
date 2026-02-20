@@ -1,6 +1,6 @@
 # Pluck
 
-Pluck is a .NET 8 CLI for incremental replication from SQL Server sources into configurable named destinations.
+Pluck is a .NET 8 CLI for incremental replication from SQL Server or Google BigQuery sources into configurable named destinations.
 
 ## What it does
 
