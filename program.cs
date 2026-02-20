@@ -16,6 +16,11 @@ public static class Program
 {
     public static async Task<int> Main(string[] args)
     {
+        return await RunApplicationAsync(args);
+    }
+
+    private static async Task<int> RunApplicationAsync(string[] args)
+    {
         if (!TryParseArgs(args, out var parsedArgs, out var parseError))
         {
             Console.Error.WriteLine(parseError);
@@ -83,214 +88,148 @@ public static class Program
             var parquetWriter = new ParquetChunkWriter();
 
             if (testConnectionsFlag)
+                return await RunConnectionTestsAsync(envConfig, destinationConnections, logger, appPrefix);
+
+            var resolvedStreams = ResolveStreams(streams, destinationConnections, streamsFilterArg, logger, appPrefix);
+
+            return await ExecuteReplicationAsync(
+                streams,
+                resolvedStreams,
+                envConfig,
+                destinationConnections,
+                runDeleteDetection,
+                failFast,
+                csvWriter,
+                parquetWriter,
+                logger,
+                appPrefix);
+        }
+        catch (SqlException ex)
+        {
+            // SQL errors: concise output without stack trace.
+            logger.LogError("{LogPrefix} {ExceptionType}: {Message}", appPrefix, ex.GetType().Name, ex.Message);
+            return 1;
+        }
+        catch (Exception ex)
+        {
+            // Non-SQL errors: full stack trace.
+            logger.LogError(ex, "{LogPrefix} Unhandled exception during replication run.", appPrefix);
+            return 1;
+        }
+    }
+
+    private static async Task<int> ExecuteReplicationAsync(
+        StreamsConfig streams,
+        List<ResolvedStreamConfig> resolvedStreams,
+        EnvironmentConfig envConfig,
+        Dictionary<string, DestinationConnectionConfig> destinationConnections,
+        bool runDeleteDetection,
+        bool failFast,
+        CsvGzipWriter csvWriter,
+        ParquetChunkWriter parquetWriter,
+        ILogger logger,
+        string appPrefix)
+    {
+        foreach (var stream in resolvedStreams)
+            LogResolvedStreamConfig(stream, logger);
+
+        var maxParallelStreams = streams.GetMaxParallelStreams();
+        logger.LogInformation(
+            "{LogPrefix} Stream execution mode: maxParallelStreams={MaxParallelStreams}, streamCount={StreamCount}",
+            appPrefix,
+            maxParallelStreams,
+            resolvedStreams.Count);
+        logger.LogInformation(
+            "{LogPrefix} Delete detection runtime switch (--delete_detection): {Enabled}",
+            appPrefix,
+            runDeleteDetection);
+        logger.LogInformation(
+            "{LogPrefix} Fail-fast runtime switch (--failfast): {Enabled}",
+            appPrefix,
+            failFast);
+
+        var failedStreams = new ConcurrentBag<string>();
+        using var failFastCts = new CancellationTokenSource();
+
+        async Task ExecuteStreamWithHandlingAsync(ResolvedStreamConfig stream, CancellationToken cancellationToken)
+        {
+            if (cancellationToken.IsCancellationRequested)
+                return;
+
+            try
             {
-                logger.LogInformation("{LogPrefix} Running connection tests...", appPrefix);
-
-                // 1) Test source SQL connections (open/close)
-                foreach (var (sourceName, sourceCfg) in envConfig.SourceConnections)
-                {
-                    try
-                    {
-                        await using var conn = new SqlConnection(sourceCfg.ConnectionString);
-                        await conn.OpenAsync();
-                        logger.LogInformation("{LogPrefix} Source SQL ({SourceConnection}): OK", appPrefix, sourceName);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(ex, "{LogPrefix} Source SQL ({SourceConnection}): FAILED", appPrefix, sourceName);
-                        return 2;
-                    }
-                }
-
-                // 2) Test destination connections.
-                foreach (var (destinationName, destinationCfg) in destinationConnections)
-                {
-                    var destinationType = NormalizeDestinationType(destinationCfg.Type);
-                    try
-                    {
-                        if (destinationType == "fabricWarehouse")
-                        {
-                            var tokenProvider = new TokenProvider(destinationCfg.Auth);
-                            using var conn = await new WarehouseConnectionFactory(destinationCfg.FabricWarehouse, tokenProvider, logger)
-                                .OpenAsync(logPrefix: appPrefix);
-                            await new OneLakeUploader(destinationCfg.OneLakeStaging, tokenProvider, logger).TestConnectionAsync();
-                        }
-                        else if (destinationType == "sqlServer")
-                        {
-                            using var conn = await new SqlServerDestinationConnectionFactory(destinationCfg.SqlServer, logger)
-                                .OpenAsync(logPrefix: appPrefix);
-                        }
-                        else
-                        {
-                            throw new Exception(
-                                $"Unsupported destination type '{destinationCfg.Type}' for destinationConnection '{destinationName}'. Supported values: fabricWarehouse, sqlServer.");
-                        }
-
-                        logger.LogInformation(
-                            "{LogPrefix} Destination ({DestinationConnection}, type={DestinationType}): OK",
-                            appPrefix,
-                            destinationName,
-                            destinationType);
-                    }
-                    catch (Exception ex)
-                    {
-                        logger.LogError(
-                            ex,
-                            "{LogPrefix} Destination ({DestinationConnection}, type={DestinationType}): FAILED",
-                            appPrefix,
-                            destinationName,
-                            destinationType);
-                        return 3;
-                    }
-                }
-
-                logger.LogInformation("{LogPrefix} All connection checks passed.", appPrefix);
-                return 0;
+                await ProcessStreamAsync(stream);
             }
-
-            var resolvedStreams = streams.GetResolvedStreams();
-            if (resolvedStreams.Any(s => string.IsNullOrWhiteSpace(s.DestinationConnection)))
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
             {
-                if (destinationConnections.Count == 1)
-                {
-                    var implicitDestination = destinationConnections.Keys.Single();
-                    foreach (var stream in resolvedStreams.Where(s => string.IsNullOrWhiteSpace(s.DestinationConnection)))
-                        stream.DestinationConnection = implicitDestination;
-                }
-                else
-                {
-                    throw new Exception(
-                        "One or more streams are missing destinationConnection and multiple destinationConnections are defined. " +
-                        "Set defaults.destinationConnection (or per-stream destinationConnection) in streams.yaml.");
-                }
+                logger.LogWarning(
+                    "{LogPrefix} Stream execution canceled due to fail-fast cancellation.",
+                    $"[stream={stream.Name}]");
             }
-            if (!string.IsNullOrWhiteSpace(streamsFilterArg))
+            catch (Exception ex)
             {
-                var requestedStreams = streamsFilterArg
-                    .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                    .Where(s => !string.IsNullOrWhiteSpace(s))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList();
+                failedStreams.Add(stream.Name);
+                logger.LogError(ex, "{LogPrefix} Stream failed.", $"[stream={stream.Name}]");
 
-                if (requestedStreams.Count == 0)
-                    throw new Exception("Invalid --streams value. Provide one or more comma-separated stream names.");
-
-                var requestedSet = new HashSet<string>(requestedStreams, StringComparer.OrdinalIgnoreCase);
-                var availableSet = new HashSet<string>(resolvedStreams.Select(s => s.Name), StringComparer.OrdinalIgnoreCase);
-                var missing = requestedStreams.Where(name => !availableSet.Contains(name)).ToList();
-                if (missing.Count > 0)
-                    throw new Exception($"Unknown stream(s) in --streams: {string.Join(", ", missing)}.");
-
-                resolvedStreams = resolvedStreams
-                    .Where(s => requestedSet.Contains(s.Name))
-                    .ToList();
-
-                logger.LogInformation(
-                    "{LogPrefix} Stream filter enabled (--streams): {Streams}",
-                    appPrefix,
-                    string.Join(", ", requestedStreams));
+                if (failFast && !failFastCts.IsCancellationRequested)
+                {
+                    logger.LogError(
+                        "{LogPrefix} --failfast enabled; canceling remaining streams after failure in stream {StreamName}.",
+                        appPrefix,
+                        stream.Name);
+                    failFastCts.Cancel();
+                }
             }
+        }
 
+        if (maxParallelStreams <= 1)
+        {
             foreach (var stream in resolvedStreams)
-                LogResolvedStreamConfig(stream);
-
-            var maxParallelStreams = streams.GetMaxParallelStreams();
-            logger.LogInformation(
-                "{LogPrefix} Stream execution mode: maxParallelStreams={MaxParallelStreams}, streamCount={StreamCount}",
-                appPrefix,
-                maxParallelStreams,
-                resolvedStreams.Count);
-            logger.LogInformation(
-                "{LogPrefix} Delete detection runtime switch (--delete_detection): {Enabled}",
-                appPrefix,
-                runDeleteDetection);
-            logger.LogInformation(
-                "{LogPrefix} Fail-fast runtime switch (--failfast): {Enabled}",
-                appPrefix,
-                failFast);
-
-            var failedStreams = new ConcurrentBag<string>();
-            using var failFastCts = new CancellationTokenSource();
-
-            async Task ExecuteStreamWithHandlingAsync(ResolvedStreamConfig stream, CancellationToken cancellationToken)
             {
-                if (cancellationToken.IsCancellationRequested)
-                    return;
+                if (failFastCts.IsCancellationRequested)
+                    break;
 
-                try
-                {
-                    await ProcessStreamAsync(stream);
-                }
-                catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-                {
-                    logger.LogWarning(
-                        "{LogPrefix} Stream execution canceled due to fail-fast cancellation.",
-                        $"[stream={stream.Name}]");
-                }
-                catch (Exception ex)
-                {
-                    failedStreams.Add(stream.Name);
-                    logger.LogError(ex, "{LogPrefix} Stream failed.", $"[stream={stream.Name}]");
-
-                    if (failFast && !failFastCts.IsCancellationRequested)
+                await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token);
+            }
+        }
+        else
+        {
+            try
+            {
+                await Parallel.ForEachAsync(
+                    resolvedStreams,
+                    new ParallelOptions
                     {
-                        logger.LogError(
-                            "{LogPrefix} --failfast enabled; canceling remaining streams after failure in stream {StreamName}.",
-                            appPrefix,
-                            stream.Name);
-                        failFastCts.Cancel();
-                    }
-                }
+                        MaxDegreeOfParallelism = maxParallelStreams,
+                        CancellationToken = failFastCts.Token
+                    },
+                    async (stream, cancellationToken) => await ExecuteStreamWithHandlingAsync(stream, cancellationToken));
             }
-
-            if (maxParallelStreams <= 1)
+            catch (OperationCanceledException) when (failFast && failFastCts.IsCancellationRequested)
             {
-                foreach (var stream in resolvedStreams)
-                {
-                    if (failFastCts.IsCancellationRequested)
-                        break;
-
-                    await ExecuteStreamWithHandlingAsync(stream, failFastCts.Token);
-                }
+                logger.LogInformation("{LogPrefix} Stream execution canceled due to --failfast.", appPrefix);
             }
-            else
-            {
-                try
-                {
-                    await Parallel.ForEachAsync(
-                        resolvedStreams,
-                        new ParallelOptions
-                        {
-                            MaxDegreeOfParallelism = maxParallelStreams,
-                            CancellationToken = failFastCts.Token
-                        },
-                        async (stream, cancellationToken) => await ExecuteStreamWithHandlingAsync(stream, cancellationToken));
-                }
-                catch (OperationCanceledException) when (failFast && failFastCts.IsCancellationRequested)
-                {
-                    logger.LogInformation("{LogPrefix} Stream execution canceled due to --failfast.", appPrefix);
-                }
-            }
+        }
 
-            if (!failedStreams.IsEmpty)
-            {
-                var failed = failedStreams
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .OrderBy(name => name)
-                    .ToList();
+        if (!failedStreams.IsEmpty)
+        {
+            var failed = failedStreams
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(name => name)
+                .ToList();
 
-                logger.LogError(
-                    "{LogPrefix} Replication run completed with failed streams ({FailedCount}): {FailedStreams}",
-                    appPrefix,
-                    failed.Count,
-                    string.Join(", ", failed));
-                return 1;
-            }
+            logger.LogError(
+                "{LogPrefix} Replication run completed with failed streams ({FailedCount}): {FailedStreams}",
+                appPrefix,
+                failed.Count,
+                string.Join(", ", failed));
+            return 1;
+        }
 
-            return 0;
+        return 0;
 
-            async Task ProcessStreamAsync(ResolvedStreamConfig stream)
-            {
+        async Task ProcessStreamAsync(ResolvedStreamConfig stream)
+        {
                 var streamPrefix = $"[stream={stream.Name}]";
                 if (!envConfig.SourceConnections.TryGetValue(stream.SourceConnection, out var sourceCfg))
                     throw new Exception(
@@ -1116,42 +1055,151 @@ public static class Program
                 logger.LogInformation("{LogPrefix} === Stream {StreamName} complete ===", streamPrefix, stream.Name);
             }
 
-            void LogResolvedStreamConfig(ResolvedStreamConfig stream)
+        }
+
+    private static async Task<int> RunConnectionTestsAsync(
+        EnvironmentConfig envConfig,
+        Dictionary<string, DestinationConnectionConfig> destinationConnections,
+        ILogger logger,
+        string appPrefix)
+    {
+        logger.LogInformation("{LogPrefix} Running connection tests...", appPrefix);
+
+        foreach (var (sourceName, sourceCfg) in envConfig.SourceConnections)
+        {
+            try
             {
-                var streamPrefix = $"[stream={stream.Name}]";
-                logger.LogDebug(
-                    "{LogPrefix} Resolved stream config: sourceConnection={SourceConnection}; destinationConnection={DestinationConnection}; sourceSql={SourceSql}; targetSchema={TargetSchema}; targetTable={TargetTable}; primaryKey=[{PrimaryKey}]; excludeColumns=[{ExcludeColumns}]; updateKey={UpdateKey}; chunkSize={ChunkSize}; stagingFileFormat={StagingFileFormat}; sqlServerBufferChunksToCsvBeforeBulkCopy={SqlServerBufferChunksToCsvBeforeBulkCopy}; sqlServerCreateClusteredColumnstoreOnCreate={SqlServerCreateClusteredColumnstoreOnCreate}; deleteDetectionType={DeleteDetectionType}; deleteDetectionWhere={DeleteDetectionWhere}; changeTrackingEnabled={ChangeTrackingEnabled}; changeTrackingSourceTable={ChangeTrackingSourceTable}",
-                    streamPrefix,
-                    stream.SourceConnection,
-                    stream.DestinationConnection,
-                    stream.SourceSql,
-                    stream.TargetSchema ?? "<env-default>",
-                    stream.TargetTable,
-                    string.Join(", ", stream.PrimaryKey),
-                    stream.ExcludeColumns.Count > 0 ? string.Join(", ", stream.ExcludeColumns) : "<none>",
-                    stream.UpdateKey,
-                    stream.ChunkSize ?? "<none>",
-                    stream.StagingFileFormat,
-                    stream.SqlServer.BufferChunksToCsvBeforeBulkCopy == true,
-                    stream.SqlServer.CreateClusteredColumnstoreOnCreate == true,
-                    stream.DeleteDetection.Type,
-                    string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where,
-                    stream.ChangeTracking.Enabled == true,
-                    stream.ChangeTracking.SourceTable ?? "<none>");
+                await using var conn = new SqlConnection(sourceCfg.ConnectionString);
+                await conn.OpenAsync();
+                logger.LogInformation("{LogPrefix} Source SQL ({SourceConnection}): OK", appPrefix, sourceName);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "{LogPrefix} Source SQL ({SourceConnection}): FAILED", appPrefix, sourceName);
+                return 2;
             }
         }
-        catch (SqlException ex)
+
+        foreach (var (destinationName, destinationCfg) in destinationConnections)
         {
-            // SQL errors: concise output without stack trace.
-            logger.LogError("{LogPrefix} {ExceptionType}: {Message}", appPrefix, ex.GetType().Name, ex.Message);
-            return 1;
+            var destinationType = NormalizeDestinationType(destinationCfg.Type);
+            try
+            {
+                if (destinationType == "fabricWarehouse")
+                {
+                    var tokenProvider = new TokenProvider(destinationCfg.Auth);
+                    using var conn = await new WarehouseConnectionFactory(destinationCfg.FabricWarehouse, tokenProvider, logger)
+                        .OpenAsync(logPrefix: appPrefix);
+                    await new OneLakeUploader(destinationCfg.OneLakeStaging, tokenProvider, logger).TestConnectionAsync();
+                }
+                else if (destinationType == "sqlServer")
+                {
+                    using var conn = await new SqlServerDestinationConnectionFactory(destinationCfg.SqlServer, logger)
+                        .OpenAsync(logPrefix: appPrefix);
+                }
+                else
+                {
+                    throw new Exception(
+                        $"Unsupported destination type '{destinationCfg.Type}' for destinationConnection '{destinationName}'. Supported values: fabricWarehouse, sqlServer.");
+                }
+
+                logger.LogInformation(
+                    "{LogPrefix} Destination ({DestinationConnection}, type={DestinationType}): OK",
+                    appPrefix,
+                    destinationName,
+                    destinationType);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(
+                    ex,
+                    "{LogPrefix} Destination ({DestinationConnection}, type={DestinationType}): FAILED",
+                    appPrefix,
+                    destinationName,
+                    destinationType);
+                return 3;
+            }
         }
-        catch (Exception ex)
+
+        logger.LogInformation("{LogPrefix} All connection checks passed.", appPrefix);
+        return 0;
+    }
+
+    private static List<ResolvedStreamConfig> ResolveStreams(
+        StreamsConfig streamsConfig,
+        Dictionary<string, DestinationConnectionConfig> destinationConnections,
+        string? streamsFilterArg,
+        ILogger logger,
+        string appPrefix)
+    {
+        var resolvedStreams = streamsConfig.GetResolvedStreams();
+        if (resolvedStreams.Any(s => string.IsNullOrWhiteSpace(s.DestinationConnection)))
         {
-            // Non-SQL errors: full stack trace.
-            logger.LogError(ex, "{LogPrefix} Unhandled exception during replication run.", appPrefix);
-            return 1;
+            if (destinationConnections.Count == 1)
+            {
+                var implicitDestination = destinationConnections.Keys.Single();
+                foreach (var stream in resolvedStreams.Where(s => string.IsNullOrWhiteSpace(s.DestinationConnection)))
+                    stream.DestinationConnection = implicitDestination;
+            }
+            else
+            {
+                throw new Exception(
+                    "One or more streams are missing destinationConnection and multiple destinationConnections are defined. " +
+                    "Set defaults.destinationConnection (or per-stream destinationConnection) in streams.yaml.");
+            }
         }
+
+        if (string.IsNullOrWhiteSpace(streamsFilterArg))
+            return resolvedStreams;
+
+        var requestedStreams = streamsFilterArg
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (requestedStreams.Count == 0)
+            throw new Exception("Invalid --streams value. Provide one or more comma-separated stream names.");
+
+        var requestedSet = new HashSet<string>(requestedStreams, StringComparer.OrdinalIgnoreCase);
+        var availableSet = new HashSet<string>(resolvedStreams.Select(s => s.Name), StringComparer.OrdinalIgnoreCase);
+        var missing = requestedStreams.Where(name => !availableSet.Contains(name)).ToList();
+        if (missing.Count > 0)
+            throw new Exception($"Unknown stream(s) in --streams: {string.Join(", ", missing)}.");
+
+        resolvedStreams = resolvedStreams
+            .Where(s => requestedSet.Contains(s.Name))
+            .ToList();
+
+        logger.LogInformation(
+            "{LogPrefix} Stream filter enabled (--streams): {Streams}",
+            appPrefix,
+            string.Join(", ", requestedStreams));
+        return resolvedStreams;
+    }
+
+    private static void LogResolvedStreamConfig(ResolvedStreamConfig stream, ILogger logger)
+    {
+        var streamPrefix = $"[stream={stream.Name}]";
+        logger.LogDebug(
+            "{LogPrefix} Resolved stream config: sourceConnection={SourceConnection}; destinationConnection={DestinationConnection}; sourceSql={SourceSql}; targetSchema={TargetSchema}; targetTable={TargetTable}; primaryKey=[{PrimaryKey}]; excludeColumns=[{ExcludeColumns}]; updateKey={UpdateKey}; chunkSize={ChunkSize}; stagingFileFormat={StagingFileFormat}; sqlServerBufferChunksToCsvBeforeBulkCopy={SqlServerBufferChunksToCsvBeforeBulkCopy}; sqlServerCreateClusteredColumnstoreOnCreate={SqlServerCreateClusteredColumnstoreOnCreate}; deleteDetectionType={DeleteDetectionType}; deleteDetectionWhere={DeleteDetectionWhere}; changeTrackingEnabled={ChangeTrackingEnabled}; changeTrackingSourceTable={ChangeTrackingSourceTable}",
+            streamPrefix,
+            stream.SourceConnection,
+            stream.DestinationConnection,
+            stream.SourceSql,
+            stream.TargetSchema ?? "<env-default>",
+            stream.TargetTable,
+            string.Join(", ", stream.PrimaryKey),
+            stream.ExcludeColumns.Count > 0 ? string.Join(", ", stream.ExcludeColumns) : "<none>",
+            stream.UpdateKey,
+            stream.ChunkSize ?? "<none>",
+            stream.StagingFileFormat,
+            stream.SqlServer.BufferChunksToCsvBeforeBulkCopy == true,
+            stream.SqlServer.CreateClusteredColumnstoreOnCreate == true,
+            stream.DeleteDetection.Type,
+            string.IsNullOrWhiteSpace(stream.DeleteDetection.Where) ? "<none>" : stream.DeleteDetection.Where,
+            stream.ChangeTracking.Enabled == true,
+            stream.ChangeTracking.SourceTable ?? "<none>");
     }
 
     private static bool TryParseArgs(string[] args, out ParsedArgs parsed, out string? error)
